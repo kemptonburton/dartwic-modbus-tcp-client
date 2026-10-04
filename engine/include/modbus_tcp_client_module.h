@@ -10,7 +10,6 @@
 #include <modbus_tcp_client.h>
 #include <mutex>
 #include <optional>
-#include <thread>
 
 class ModbusTCPClientModule : public DARTWIC::Modules::BaseModule {
 public:
@@ -26,7 +25,7 @@ private:
     std::string instance_name_;
     std::mutex connection_mutex_;
     ModbusTCPClient client_;
-    std::jthread connection_monitor_thread_;
+    bool connection_monitor_enabled_{true};
 };
 
 #endif //MODBUS_TCP_CLIENT_MODULE_H

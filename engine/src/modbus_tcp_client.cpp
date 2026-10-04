@@ -244,7 +244,7 @@ void ModbusTCPClient::markProtocolResponsive() {
     consecutive_connection_failures_ = 0;
     next_reconnect_attempt_ = {};
     setProtocolHealthy(true);
-    resolveConnectionError();
+    last_connection_error_message_.clear();
 }
 
 void ModbusTCPClient::scheduleReconnect() {
@@ -364,30 +364,13 @@ void ModbusTCPClient::publishConnectionError(const std::string& error_message) {
     if (last_connection_error_publication_.time_since_epoch().count() != 0 &&
         now - last_connection_error_publication_ < std::chrono::milliseconds(750)) return;
     last_connection_error_publication_ = now;
-    const auto event = module_->dartwic->recordEvent({
-        {"type", "error"},
-        {"title", "MODBUS CONNECTION ERROR [" + instance_name_ + "]"},
-        {"description", last_connection_error_message_ + " [" + server_ip_ + ":" +
-            std::to_string(server_port_) + ", unit " + std::to_string(unit_id_) + "]"},
-        {"resolution", "Verify the endpoint and device availability."},
-        {"system", event_system_},
-        {"subsystem", event_subsystem_},
-        {"channels", {instance_name_ + ".info.connected"}},
-        {"correlation_key", "modbus_connection_error|" + instance_name_},
-        {"auto_acknowledge_seconds", 0},
-        {"payload", {
-            {"argus_record_kind", "plugin_declared_event"},
-            {"plugin_event", {{"key", "modbus_connection_error|" + instance_name_}}}
-        }}
-    });
-    connection_error_event_id_ = event.value("event_id", connection_error_event_id_);
-}
-
-void ModbusTCPClient::resolveConnectionError() {
-    last_connection_error_message_.clear();
-    if (connection_error_event_id_.empty()) return;
-    module_->dartwic->updateEventStatus(connection_error_event_id_, "resolved");
-    connection_error_event_id_.clear();
+    module_->dartwic->consoleError(
+        "MODBUS CONNECTION ERROR [" + instance_name_ + "]",
+        last_connection_error_message_ + " [" + server_ip_ + ":" +
+            std::to_string(server_port_) + ", unit " + std::to_string(unit_id_) + "]",
+        {instance_name_ + ".info.connected"},
+        "Verify the endpoint and device availability.",
+        0);
 }
 
 void ModbusTCPClient::publishOperationError(const std::string& operation_name, const std::string& error_message) {
@@ -400,7 +383,7 @@ void ModbusTCPClient::publishOperationError(const std::string& operation_name, c
         operation_name + ": " + error_message,
         {instance_name_ + ".info.connected"},
         "Verify mapped addresses, device state, and timeout settings.",
-        3
+        0
     );
 }
 

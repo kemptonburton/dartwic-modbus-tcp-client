@@ -7,24 +7,23 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
+#include "channel_references.h"
 
-namespace DARTWIC::Share {
-    class ShareTransport;
-    using ShareTransportPtr = std::shared_ptr<ShareTransport>;
-}
+namespace TEMPEST { class Transport; class Peer; }
 
 namespace DARTWIC::Modules {
     class BaseModule;
 }
 
 namespace DARTWIC::API {
-    /** DARTWIC Share Protocol transport SPI used by engine Share transports. */
-    using ShareTransport = DARTWIC::Share::ShareTransport;
-    using ShareTransportPtr = DARTWIC::Share::ShareTransportPtr;
+    /** TEMPEST transport interface used by custom engine connections. */
+    using Transport = TEMPEST::Transport;
+    using TransportPtr = std::shared_ptr<TEMPEST::Transport>;
 
     /**
      * Execution shape used by a registered task type.
@@ -37,6 +36,7 @@ namespace DARTWIC::API {
         Periodic,
         StateMachine,
         Sequence,
+        Timeline,
         Worker
     };
 
@@ -58,7 +58,8 @@ namespace DARTWIC::API {
         CONTROL_OWNER,
         ACTIVE_CONTROLLER,
         LINKED_CALCULATION_SCRIPTS,
-        VALUE_OPTIONS
+        VALUE_OPTIONS,
+        STARTUP_VALUE
     };
 
     /**
@@ -97,12 +98,24 @@ namespace DARTWIC::API {
         uint32_t line_number = 0;
     };
 
+    struct StartupValue {
+        bool enabled = false;
+        double value = 0.0;
+    };
+
     enum class ChannelStorage {
         Dynamic,
         Fixed
     };
 
-    /** Stable, pre-resolved address of a fixed RAPID channel. */
+    /**
+     * Stable, pre-resolved address of a fixed RAPID channel.
+     *
+     * Handles are intentionally opaque to plugins. Resolve them during task setup and
+     * reuse them in high-frequency callbacks to avoid channel-name lookup overhead.
+     * @dartwic-reference
+     * @category Channels
+     */
     struct FixedChannelHandle {
         uint32_t slot = 0;
         uint64_t binding_generation = 0;
@@ -110,7 +123,11 @@ namespace DARTWIC::API {
         [[nodiscard]] bool valid() const noexcept { return binding_generation != 0; }
     };
 
-    /** Ordered channel names and handles used by the fixed-channel batch APIs. */
+    /**
+     * Ordered channel names and handles used by the fixed-channel batch APIs.
+     * @dartwic-reference
+     * @category Channels
+     */
     struct FixedChannelBatch {
         std::vector<std::string> channels;
         std::vector<FixedChannelHandle> handles;
@@ -126,7 +143,7 @@ namespace DARTWIC::API {
      * @category Channels
      */
     using ChannelValue = std::variant<double, int, std::string, bool, RecordMode, ControlPolicy,
-        std::vector<ChannelValueOption>, std::vector<ChannelCalculationLink>>;
+        std::vector<ChannelValueOption>, std::vector<ChannelCalculationLink>, StartupValue>;
 
     /**
      * Handler for a plugin-defined TEMPEST extension operation.
@@ -137,6 +154,43 @@ namespace DARTWIC::API {
      * @category Operations
      */
     using OperationHandler = std::function<nlohmann::json(const nlohmann::json& payload)>;
+
+    /** A typed argument in a peer-visible command descriptor.
+     * @dartwic-reference
+     * @category Operations
+     */
+    struct OperationArgumentDefinition {
+        std::string name;
+        std::string type;
+        std::string description;
+        bool required = false;
+        std::optional<nlohmann::json> default_value;
+        std::vector<nlohmann::json> choices;
+    };
+    /** Registers an executable plugin operation and its operator-facing metadata.
+     * @dartwic-reference
+     * @category Operations
+     */
+    struct OperationDefinition {
+        std::string id;
+        std::string name;
+        std::string description;
+        std::string category;
+        std::vector<OperationArgumentDefinition> arguments;
+        OperationHandler handler;
+        bool allow_viewers = false;
+    };
+
+    /** Declares an operator-visible telemetry topic before its first publication.
+     * @dartwic-reference
+     * @category Operations
+     */
+    struct TelemetryDefinition {
+        std::string id;
+        std::string name;
+        std::string description;
+        std::string delivery;
+    };
 
     /**
      * Native callback exposed to DCode through the plugin SDK.
@@ -157,52 +211,6 @@ namespace DARTWIC::API {
         std::string type;
         std::string doc;
         bool required = false;
-    };
-
-    /**
-     * Driver-host periodic task ABI.
-     *
-     * @dartwic-reference-exclude driver-descoped
-     */
-    struct DriverPeriodicTaskRegistration {
-        const char* task_type = nullptr;
-        const char* task_name = nullptr;
-        void* context = nullptr;
-        void (*on_start)(void* context, double elapsed_seconds) = nullptr;
-        void (*on_task)(void* context, double elapsed_seconds) = nullptr;
-        void (*on_end)(void* context, double elapsed_seconds) = nullptr;
-    };
-
-    /**
-     * Driver-host state-machine task ABI.
-     *
-     * @dartwic-reference-exclude driver-descoped
-     */
-    struct DriverStateMachineTaskRegistration {
-        const char* task_type = nullptr;
-        const char* task_name = nullptr;
-        const char* states_json = nullptr;
-        void* context = nullptr;
-        void (*on_start)(void* context, double elapsed_seconds) = nullptr;
-        void (*on_task)(void* context, double elapsed_seconds) = nullptr;
-        void (*on_end)(void* context, double elapsed_seconds) = nullptr;
-    };
-
-    /**
-     * Driver runtime host ABI. This ABI accepts only flat channel names and typed fields.
-     *
-     * @dartwic-reference-exclude driver-descoped
-     */
-    struct DriverPluginHostApi {
-        void* host_context = nullptr;
-        double (*query_channel_value)(void* host_context, const char* channel_name, double default_value) = nullptr;
-        void (*upsert_channel_value)(void* host_context, const char* channel_name, double value) = nullptr;
-        bool (*register_periodic_task)(void* host_context, const DriverPeriodicTaskRegistration* registration) = nullptr;
-        bool (*register_state_machine_task)(void* host_context, const DriverStateMachineTaskRegistration* registration) = nullptr;
-        bool (*register_dcode_function)(void* host_context, const char* function_name, const char* doc, const char* input_arguments_json, const char* output_arguments_json, void* function_context, const char* (*callback)(void* function_context, const char* payload_json)) = nullptr;
-        const char* (*call_dcode_function)(void* host_context, const char* function_name, const char* payload_json) = nullptr;
-        void (*free_json_string)(void* host_context, const char* value) = nullptr;
-        void (*log_message)(void* host_context, const char* message) = nullptr;
     };
 
     struct TaskTypeDefinition;
@@ -248,7 +256,21 @@ namespace DARTWIC::API {
         virtual void clearRuntimeContext() = 0;
         // Keep new virtual functions appended so plugins built against the previous
         // TaskRuntime vtable retain the indices of all existing functions.
+        /** Declares this task's fixed snapshot inputs from on_configure. Every declared name
+         * must refer to fixed storage when configuration completes; missing/dynamic inputs
+         * fail task preparation. An empty list requests an empty fixed input snapshot.
+         * Calls from other callbacks throw rather than changing an active plan. */
         virtual void setFixedInputChannels(std::vector<std::string> channels) = 0;
+
+        /**
+         * Records one completed logical iteration of a long-running worker task.
+         *
+         * Worker callbacks own their internal loop, so the engine cannot infer
+         * individual iterations from callback returns. Plugins should call this
+         * once after each successful worker iteration. The engine samples the
+         * counter to publish the task's worker-rate diagnostic.
+         */
+        virtual void recordWorkerCycle() = 0;
 
         template <typename T>
         void setTypedRuntimeContext(const std::string& key, const std::shared_ptr<T>& value) {
@@ -298,6 +320,10 @@ namespace DARTWIC::API {
         TaskMissedFunction on_missed;
         TaskLifecycleFunction on_end;
         TaskCleanupFunction cleanup;
+        // Suppress timing warnings; scheduling, measurements and callback errors remain active.
+        void setDisableWarnings(bool disabled = true) {
+            metadata.default_arguments["disable_warnings"] = disabled;
+        }
     };
 
     /**
@@ -326,17 +352,20 @@ namespace DARTWIC::API {
         std::string default_parameters_path = "default_parameters.json";
     };
 
-    /**
-     * Declares a plugin-provided transport for DARTWIC Share frames.
-     *
-     * DARTWICShare continues to own channel/event synchronization and routing;
-     * the factory only creates the network link used by a configured connection.
+    /** One operator-selectable peer with a fixed protocol and transport.
+     * @dartwic-reference
+     * @category TEMPEST
      */
-    struct ShareTransportDefinition {
+    struct PeerDefinition {
         std::string id;
         std::string name;
+        uint64_t version = 1;
         nlohmann::json default_config = nlohmann::json::object();
-        std::function<ShareTransportPtr(const nlohmann::json& config)> create;
+        std::string protocol_id = "tempest.peer";
+        uint64_t protocol_version = 1;
+        bool engine_protocol = false;
+        std::function<TransportPtr(const nlohmann::json& config)> create;
+        std::function<void(TEMPEST::Peer& peer)> configure;
     };
 
     /**
@@ -386,12 +415,16 @@ namespace DARTWIC::API {
             std::optional<ChannelValue> default_value) = 0;
 
         /**
-         * Inserts a channel field and fails when the addressed channel or field already exists.
+         * Creates a missing channel with an initial field value; an existing channel is left unchanged.
+         *
+         * This is a no-op for an existing channel, including its storage class.
+         * To promote existing storage, use upsertChannelField with Fixed storage during configuration.
          * @dartwic-reference
          * @category Channels
          * @param channel Flat channel name.
          * @param field Field to insert.
          * @param value Initial field value.
+         * @param storage Storage used for a newly created channel; defaults to dynamic.
          */
         virtual void insertChannelField(const std::string& channel,
             ChannelField field,
@@ -405,11 +438,28 @@ namespace DARTWIC::API {
          * @param channel Flat channel name.
          * @param field Field to write.
          * @param value New field value.
+         * @param storage Storage used only when creating or promoting the channel; defaults to dynamic.
          */
         virtual void upsertChannelField(const std::string& channel,
             ChannelField field,
             ChannelValue value,
             ChannelStorage storage = ChannelStorage::Dynamic) = 0;
+
+        /**
+         * Creates a channel in fixed RAPID storage, or promotes an existing dynamic channel.
+         *
+         * Call during startup configuration or a task's on_configure callback. The engine's
+         * declared configuration transaction permits layout updates after active task snapshots
+         * drain, even when the layout is sealed. Direct layout changes outside that boundary
+         * remain restricted. This writes initial_value; ordinary subsequent field writes
+         * preserve fixed storage. Do not recreate the channel in every acquisition callback.
+         *
+         * @dartwic-reference
+         * @category Channels
+         * @param channel Flat channel name.
+         * @param initial_value Initial numeric value; defaults to zero.
+         */
+        void createFixedChannel(const std::string& channel, double initial_value = 0.0);
 
         /**
          * Removes a channel and its associated field data.
@@ -428,7 +478,14 @@ namespace DARTWIC::API {
          * @returns The plugin-qualified module type identifier.
          */
         virtual std::string registerModuleType(ModuleTypeDefinition definition) = 0;
-        virtual std::string registerShareTransport(ShareTransportDefinition definition) = 0;
+        /**
+         * Registers a plugin-qualified peer definition with one transport factory.
+         * @dartwic-reference
+         * @category TEMPEST
+         * @param definition Local ID, display name, editable defaults, protocol, transport, and handlers.
+         * @returns The plugin-qualified peer ID used by tempest/peers/connect.
+         */
+        virtual std::string registerPeer(PeerDefinition definition) = 0;
         /**
          * Registers a plugin-local task type and returns its qualified identifier.
          * @dartwic-reference
@@ -443,12 +500,54 @@ namespace DARTWIC::API {
          * Registers a plugin extension operation; it does not become an official DARTWIC operation.
          * @dartwic-reference
          * @category Operations
-         * @param local_id Identifier unique within the plugin.
-         * @param name Operator-facing operation name.
-         * @param handler JSON request handler.
+         * @param definition Local ID, display metadata, argument fields, and handler.
          * @returns The plugin-qualified operation identifier.
          */
-        virtual std::string registerOperation(std::string local_id, std::string name, OperationHandler handler) = 0;
+        virtual std::string registerOperation(OperationDefinition definition) = 0;
+        // Convenience for operations without argument metadata. Delegates to the
+        // registered definition and does not add a virtual slot to the SDK ABI.
+        std::string registerOperation(std::string local_id, std::string name, OperationHandler handler) {
+            OperationDefinition definition;
+            definition.id = std::move(local_id);
+            definition.name = std::move(name);
+            definition.handler = std::move(handler);
+            return registerOperation(std::move(definition));
+        }
+        /**
+         * Registers a plugin-local telemetry topic for the runtime catalog.
+         * The plugin namespace supplies the qualified topic and operator category.
+         * @dartwic-reference
+         * @category Operations
+         * @param definition Local topic ID and operator-facing metadata.
+         * @returns The plugin-qualified topic.
+         */
+        virtual std::string registerTelemetry(TelemetryDefinition definition) = 0;
+        /**
+         * Calls a registered TEMPEST operation on the current node or a connected peer.
+         * Payloads use JSON at the engine SDK boundary; peers use Value.
+         * A remote timeout reports unknown completion and never retries the operation.
+         * @dartwic-reference
+         * @category Operations
+         * @param node Current engine node name or connected remote node name.
+         * @param operation Fully qualified operation name, such as fprime/command.
+         * @param payload Operation arguments.
+         * @returns The operation result; throws on local failure, disconnection, timeout, or remote failure.
+         */
+        virtual nlohmann::json callTempest(const std::string& node, const std::string& operation,
+                                           const nlohmann::json& payload) {
+            throw std::runtime_error("TEMPEST peer calls are unavailable in this SDK host.");
+        }
+        /**
+         * Publishes telemetry on a plugin-qualified topic to connected clients and peers.
+         * Delivery is best effort; subscribers may miss samples while disconnected.
+         * @dartwic-reference
+         * @category Operations
+         * @param topic Plugin-local topic name.
+         * @param payload Object containing the telemetry values.
+         */
+        virtual void publishTelemetry(const std::string& topic, const nlohmann::json& payload) {
+            throw std::runtime_error("TEMPEST telemetry is unavailable in this SDK host.");
+        }
         /**
          * Registers a native DCode function together with its editor-facing argument documentation.
          * @dartwic-reference
@@ -545,11 +644,11 @@ namespace DARTWIC::API {
          */
         virtual void commandChannel(const std::string& channel, ChannelValue value) = 0;
         /**
-         * Sets the active controller's value without issuing a manual command.
+         * Establishes observe-only authority for the active task or loop, optionally writing its value.
          * @dartwic-reference
          * @category Channel Authority
          * @param channel Flat channel name.
-         * @param value Optional value; null clears the controller value.
+         * @param value Optional value; omitting it preserves the current numeric value.
          */
         virtual void setChannel(const std::string& channel, std::optional<ChannelValue> value = std::nullopt) = 0;
         /**
@@ -575,28 +674,82 @@ namespace DARTWIC::API {
          * auto_acknowledge_seconds. A stable correlation_key updates one event
          * instead of creating a new event for each heartbeat.
          *
+         * Optional `graphs` accepts an array of graph groups. Each group may be an array of shorthand
+         * strings or an object with a `series` array and optional `title` / `window_seconds` fields.
+         * Shorthand series use `|channel|`, `>value`, `>=value`, `<value`, `<=value`, or `=value` and
+         * may append `@1` through `@5` to select a Y axis. Object series accept `channel_reference`
+         * (or `expression`) plus `y_axis`, `label`, and `color`. For example:
+         * `{"graphs":[["|temperature|@1",">100@1"],["|pressure|@1","=50@2"]]}`.
          * @dartwic-reference
          * @category Events
+         * @param event Event declaration to create or refresh.
          * @returns The complete accepted ARGUS event record.
          */
         virtual nlohmann::json recordEvent(nlohmann::json event) { return nlohmann::json::object(); }
 
-        /** Updates the lifecycle status of an ARGUS event by event identifier. */
+        /**
+         * Updates the lifecycle status of an ARGUS event by event identifier.
+         * @param event_id Event identifier to update.
+         * @param status New lifecycle status.
+         */
         virtual bool updateEventStatus(const std::string& event_id, const std::string& status) {
             (void)event_id;
             (void)status;
             return false;
         }
 
+        /**
+         * Resolves fixed channels during configuration to avoid repeated name lookup in callbacks.
+         * This does not make the complete callback, write wrapper, or commit allocation-free.
+         * Throws when a name is missing or does not refer to fixed storage.
+         * @dartwic-reference
+         * @category Channels
+         * @param channels Ordered fixed-channel names to resolve.
+         */
         virtual FixedChannelBatch resolveFixedChannels(const std::vector<std::string>& channels) = 0;
+
+        /**
+         * Reads a coherent task-input snapshot into caller-owned storage.
+         *
+         * Declare these inputs with TaskRuntime::setFixedInputChannels during configuration.
+         * Outside a task snapshot, reads observe live values instead. Undeclared inputs in an
+         * ordinary partial snapshot also use live fallback, so declare every fixed input.
+         * Re-resolve after configuration changes; stale handles return the supplied fallback.
+         * @dartwic-reference
+         * @category Channels
+         * @param batch Previously resolved fixed-channel batch.
+         * @param destination Caller-owned output span with one element per channel.
+         * @param default_value Value used when a fixed-channel value is unavailable.
+         */
         virtual void queryFixedChannelValues(const FixedChannelBatch& batch,
             std::span<double> destination,
             double default_value = 0.0) = 0;
+
+        /**
+         * Stages one value per fixed channel in the current task transaction.
+         *
+         * Preserves ordinary command-authority checks. This does not claim channel ownership.
+         * Outside a task transaction, values are written immediately through the ordinary
+         * path; the call alone does not establish a coherent multi-channel transaction.
+         * Reuse the batch and value buffer. Staging, attribution, commit, inline reactions,
+         * and recording still have costs beyond resolved-handle access.
+         * @dartwic-reference
+         * @category Channels
+         * @param batch Previously resolved fixed-channel batch.
+         * @param values Input span with one value per channel.
+         * @param timestamp Optional Unix-epoch timestamp in nanoseconds.
+         */
         virtual void upsertFixedChannelValues(const FixedChannelBatch& batch,
             std::span<const double> values,
             std::optional<uint64_t> timestamp = std::nullopt) = 0;
 
-        /** Opens or updates a named interface workflow and returns its request descriptor. */
+        /**
+         * Opens or updates a named interface workflow without blocking the plugin loop.
+         * The returned object contains a request_id which can be queried for its typed JSON result.
+         * @param ui_id Plugin-local interface workflow identifier.
+         * @param payload Workflow request payload.
+         * @param options Optional workflow behavior and presentation settings.
+         */
         virtual nlohmann::json requestInterfaceUi(
             const std::string& ui_id,
             nlohmann::json payload,
@@ -607,23 +760,97 @@ namespace DARTWIC::API {
             return nlohmann::json::object();
         }
 
-        /** Returns the current status and result for a named interface workflow request. */
+        /**
+         * Returns the current status and result of a named interface workflow request.
+         * @param request_id Interface workflow request identifier.
+         */
         virtual nlohmann::json getInterfaceUiRequest(const std::string& request_id) {
             (void)request_id;
             return nlohmann::json::object();
         }
 
-        /** Announces a device found by a plugin-owned discovery loop. */
+        /**
+         * Announces a device found by a plugin-owned discovery loop.
+         * @param candidate Discovered-device identity and connection metadata.
+         */
         virtual nlohmann::json announceDiscoveredDevice(nlohmann::json candidate) {
             (void)candidate;
             return nlohmann::json::object();
         }
 
+        /**
+         * Returns whether an engine-scoped notification owned by this plugin is muted.
+         * The host qualifies the plugin-local notification ID before reading global engine state.
+         * Calling this method also marks the mute rule as relevant for expiry purposes.
+         * @param notification_id Stable plugin-local notification identity.
+         */
         virtual bool isNotificationMuted(const std::string& notification_id) {
             (void)notification_id;
             return false;
         }
+
+        /**
+         * Appends text to an ARGUS log stream without creating an operator event.
+         * Plugin calls use a plugin-qualified stream name, such as `ethercat/Bus`.
+         * The engine supplies the node, session, timestamp, and sequence. Writes
+         * are asynchronous and return false if the bounded queue is full.
+         * @dartwic-reference
+         * @category Logs
+         * @param stream Plugin-local stream name, such as `Bus`.
+         * @param text Text to append; a trailing newline is optional.
+         * @param channel `stdout` or `stderr` for console-style coloring.
+         * @param level `info`, `warning`, or `error` for filtering.
+         * @returns Whether ARGUS accepted the text for writing.
+         * @example api.writeLog("Bus", "Device connected", "stdout", "info");
+         */
+        virtual bool writeLog(const std::string& stream, const std::string& text,
+            const std::string& channel = "stdout", const std::string& level = "info") {
+            (void)stream;
+            (void)text;
+            (void)channel;
+            (void)level;
+            return false;
+        }
+
+        /** Optional channel references held only in plugin-private memory.
+         * Register during onPluginLoaded. The callback runs during a Project
+         * audit, never in a task loop. Add exact references or scan structured
+         * plugin data with the sink. Ordinary task data, fixed bindings,
+         * project files, and channel origins are found automatically.
+         * New virtual methods belong at the end of SDK_API so plugins compiled
+         * against an earlier SDK keep the same virtual method positions.
+         */
+        virtual void registerChannelReferenceSource(std::string local_id,
+            std::function<void(ChannelReferenceSink&)> collect) {
+            (void)local_id;
+            (void)collect;
+            throw std::runtime_error("Channel reference sources are unavailable in this SDK host.");
+        }
+
+        /**
+         * Calls a saved pinned operation on the current engine or a connected remote node once.
+         * @dartwic-reference
+         * @category Operations
+         * @param node Current engine node name or connected remote node name.
+         * @param preset Stable pinned-operation ID or unambiguous label for that node.
+         * @param overrides Object merged over saved operation arguments.
+         * @returns Operation result; throws if the preset is missing, ambiguous, or invocation fails.
+         */
+        virtual nlohmann::json callPinnedTempest(const std::string& node, const std::string& preset,
+                                                  const nlohmann::json& overrides = nlohmann::json::object()) {
+            throw std::runtime_error("Pinned TEMPEST peer calls are unavailable in this SDK host.");
+        }
+
     };
+
+    inline void SDK_API::createFixedChannel(const std::string& channel, double initial_value) {
+        upsertChannelField(
+            channel,
+            ChannelField::VALUE,
+            ChannelValue{initial_value},
+            ChannelStorage::Fixed
+        );
+    }
 }
 
 #endif //SDK_API_H

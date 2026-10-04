@@ -1,5 +1,5 @@
 import React from "@dartwic/interface-sdk/react";
-import {Button, Input, Label, Switch} from "@dartwic/interface-sdk/ui/general";
+import {Input, Label, Switch} from "@dartwic/interface-sdk/ui/general";
 
 const pluginId = "modbus_tcp_client";
 
@@ -83,6 +83,7 @@ async function persistDiscovery(operation: any, startAddress: number, endAddress
 }
 
 export function ModbusPluginSettings({operation}: any) {
+  const lastSavedSignature = React.useRef("");
   const [startAddress, setStartAddress] = React.useState("0");
   const [endAddress, setEndAddress] = React.useState("255");
   const [loading, setLoading] = React.useState(true);
@@ -105,16 +106,36 @@ export function ModbusPluginSettings({operation}: any) {
         const loadError = resultError(result, "Could not load discovery settings.");
         if (loadError) throw new Error(loadError);
         if (!cancelled) {
-          setStartAddress(String(result?.payload?.start_address ?? 0));
-          setEndAddress(String(result?.payload?.end_address ?? 255));
+          const loadedStartAddress = String(result?.payload?.start_address ?? 0);
+          const loadedEndAddress = String(result?.payload?.end_address ?? 255);
           const network = result?.payload?.network_scan || {};
-          setNetworkEnabled(network.enabled !== false);
-          setIncludeLocalSubnets(network.include_local_subnets !== false);
-          setSubnets(Array.isArray(network.subnets) ? network.subnets.join(", ") : "");
-          setPorts(Array.isArray(network.ports) ? network.ports.join(", ") : "502");
-          setUnitIds(Array.isArray(network.unit_ids) ? network.unit_ids.join(", ") : "1, 255");
-          setProbeTimeout(String(network.probe_timeout_ms ?? 50));
-          setMaxHosts(String(network.max_hosts_per_subnet ?? 254));
+          const loadedNetworkEnabled = network.enabled !== false;
+          const loadedIncludeLocalSubnets = network.include_local_subnets !== false;
+          const loadedSubnets = Array.isArray(network.subnets) ? network.subnets.join(", ") : "";
+          const loadedPorts = Array.isArray(network.ports) ? network.ports.join(", ") : "502";
+          const loadedUnitIds = Array.isArray(network.unit_ids) ? network.unit_ids.join(", ") : "1, 255";
+          const loadedProbeTimeout = String(network.probe_timeout_ms ?? 50);
+          const loadedMaxHosts = String(network.max_hosts_per_subnet ?? 254);
+          lastSavedSignature.current = JSON.stringify([
+            loadedStartAddress,
+            loadedEndAddress,
+            loadedNetworkEnabled,
+            loadedIncludeLocalSubnets,
+            loadedSubnets,
+            loadedPorts,
+            loadedUnitIds,
+            loadedProbeTimeout,
+            loadedMaxHosts,
+          ]);
+          setStartAddress(loadedStartAddress);
+          setEndAddress(loadedEndAddress);
+          setNetworkEnabled(loadedNetworkEnabled);
+          setIncludeLocalSubnets(loadedIncludeLocalSubnets);
+          setSubnets(loadedSubnets);
+          setPorts(loadedPorts);
+          setUnitIds(loadedUnitIds);
+          setProbeTimeout(loadedProbeTimeout);
+          setMaxHosts(loadedMaxHosts);
         }
       } catch (caught: any) {
         if (!cancelled) setError(String(caught?.message || caught).toUpperCase());
@@ -160,114 +181,141 @@ export function ModbusPluginSettings({operation}: any) {
     rescan_interval_seconds: 300,
   };
 
-  async function save() {
-    if (!valid) return;
-    setSaving(true);
-    setError("");
+  const settingsSignature = JSON.stringify([
+    startAddress,
+    endAddress,
+    networkEnabled,
+    includeLocalSubnets,
+    subnets,
+    ports,
+    unitIds,
+    probeTimeout,
+    maxHosts,
+  ]);
+  const hasUnsavedChanges = settingsSignature !== lastSavedSignature.current;
+
+  React.useEffect(() => {
+    if (loading || !hasUnsavedChanges) return;
     setMessage("");
-    try {
-      await persistDiscovery(operation, start, end, networkScan);
-      const result = await operation("modbus_tcp_client.configure_discovery", {
-        start_address: start,
-        end_address: end,
-        network_scan: networkScan,
-      }, 15000);
-      const configureError = resultError(result, "Could not apply the discovery settings.");
-      if (configureError) throw new Error(configureError);
-      setMessage(`Saved. Discovery will scan responding addresses ${start}–${end}.`);
-    } catch (caught: any) {
-      setError(String(caught?.message || caught).toUpperCase());
-    } finally {
-      setSaving(false);
-    }
-  }
+    if (!valid) return;
+
+    const timer = window.setTimeout(() => {
+      async function save() {
+        setSaving(true);
+        setError("");
+        try {
+          await persistDiscovery(operation, start, end, networkScan);
+          const result = await operation("modbus_tcp_client.configure_discovery", {
+            start_address: start,
+            end_address: end,
+            network_scan: networkScan,
+          }, 15000);
+          const configureError = resultError(result, "Could not apply the discovery settings.");
+          if (configureError) throw new Error(configureError);
+          lastSavedSignature.current = settingsSignature;
+          setMessage("SAVED");
+        } catch (caught: any) {
+          setError(String(caught?.message || caught).toUpperCase());
+        } finally {
+          setSaving(false);
+        }
+      }
+      void save();
+    }, 700);
+
+    return () => window.clearTimeout(timer);
+  }, [loading, hasUnsavedChanges, valid, settingsSignature, operation]);
 
   return (
-    <div className="max-w-2xl">
+    <div className="w-full text-xs">
       <div className="border-y border-border/70 py-5">
         <div className="flex flex-wrap items-end justify-between gap-5">
           <div>
-            <div className="text-xs font-medium text-foreground">Device discovery range</div>
-            <div className="mt-1 text-sm text-muted-foreground">
-              The finder probes this inclusive range in all four Modbus address spaces and suggests every responding address.
+            <div className="font-medium text-foreground">DEVICE DISCOVERY RANGE</div>
+            <div className="mt-1 text-muted-foreground">
+              THE FINDER PROBES THIS INCLUSIVE RANGE IN ALL FOUR MODBUS ADDRESS SPACES AND SUGGESTS EVERY RESPONDING ADDRESS.
             </div>
           </div>
           <div className="flex items-end gap-2">
             <div className="w-28 space-y-1">
-              <Label htmlFor="modbus-discovery-start">Start</Label>
+              <Label htmlFor="modbus-discovery-start" className="text-xs">START</Label>
               <Input id="modbus-discovery-start" type="number" min="0" max="65535"
+                className="text-xs"
                 value={startAddress} disabled={loading || saving}
                 onChange={(event: any) => setStartAddress(event.target.value)} />
             </div>
             <div className="w-28 space-y-1">
-              <Label htmlFor="modbus-discovery-end">End</Label>
+              <Label htmlFor="modbus-discovery-end" className="text-xs">END</Label>
               <Input id="modbus-discovery-end" type="number" min="0" max="65535"
+                className="text-xs"
                 value={endAddress} disabled={loading || saving}
                 onChange={(event: any) => setEndAddress(event.target.value)} />
             </div>
-            <Button variant="outline" disabled={loading || saving || !valid} onClick={save}>
-              {saving ? "Saving…" : "Save settings"}
-            </Button>
+            <div className={valid ? "flex h-10 min-w-20 items-center justify-end text-right text-muted-foreground" : "flex h-10 min-w-20 items-center justify-end text-right text-red"}
+              aria-live="polite">
+              {loading ? "LOADING…" : saving ? "SAVING…" : !valid ? "NOT SAVED" : message || "SAVED"}
+            </div>
           </div>
         </div>
         {!rangeValid ? (
-          <div className="mt-3 text-xs text-destructive">Use an ordered range from 0 to 65535, up to 4096 addresses.</div>
+          <div className="mt-3 text-red">USE AN ORDERED RANGE FROM 0 TO 65535, UP TO 4096 ADDRESSES.</div>
         ) : null}
-        {error ? <div className="mt-3 text-xs text-destructive">{error}</div> : null}
-        {message ? <div className="mt-3 text-xs text-emerald-300">{message}</div> : null}
+        {error ? <div className="mt-3 text-red">{error}</div> : null}
       </div>
       <div className="border-b border-border/70 py-5">
         <div className="flex items-center justify-between gap-6">
           <div>
-            <div className="text-xs font-medium text-foreground">Network discovery</div>
-            <div className="mt-1 text-sm text-muted-foreground">
-              Probe local IPv4 networks for Modbus TCP endpoints before scanning their register maps.
+            <div className="font-medium text-foreground">NETWORK DISCOVERY</div>
+            <div className="mt-1 text-muted-foreground">
+              PROBE LOCAL IPV4 NETWORKS FOR MODBUS TCP ENDPOINTS BEFORE SCANNING THEIR REGISTER MAPS.
             </div>
           </div>
           <Switch checked={networkEnabled} disabled={loading || saving}
             onCheckedChange={(checked: boolean) => setNetworkEnabled(Boolean(checked))} />
         </div>
         <div className="mt-5 flex items-center justify-between gap-6 border-t border-border/50 pt-4">
-          <Label htmlFor="modbus-local-subnets" className="normal-case">Scan detected local subnets</Label>
+          <Label htmlFor="modbus-local-subnets" className="text-xs">SCAN DETECTED LOCAL SUBNETS</Label>
           <Switch id="modbus-local-subnets" checked={includeLocalSubnets} disabled={loading || saving || !networkEnabled}
             onCheckedChange={(checked: boolean) => setIncludeLocalSubnets(Boolean(checked))} />
         </div>
         <div className="mt-4 grid grid-cols-2 gap-4">
           <div className="col-span-2 space-y-1">
-            <Label htmlFor="modbus-subnets">Additional IPv4 subnets</Label>
+            <Label htmlFor="modbus-subnets" className="text-xs">ADDITIONAL IPV4 SUBNETS</Label>
             <Input id="modbus-subnets" value={subnets} disabled={loading || saving || !networkEnabled}
+              className="text-xs"
               placeholder="192.168.10.0/24, 10.20.30.0/24"
               onChange={(event: any) => setSubnets(event.target.value)} />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="modbus-ports">Ports</Label>
+            <Label htmlFor="modbus-ports" className="text-xs">PORTS</Label>
             <Input id="modbus-ports" value={ports} disabled={loading || saving || !networkEnabled}
+              className="text-xs"
               placeholder="502" onChange={(event: any) => setPorts(event.target.value)} />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="modbus-unit-ids">Unit IDs</Label>
+            <Label htmlFor="modbus-unit-ids" className="text-xs">UNIT IDS</Label>
             <Input id="modbus-unit-ids" value={unitIds} disabled={loading || saving || !networkEnabled}
+              className="text-xs"
               placeholder="1, 255" onChange={(event: any) => setUnitIds(event.target.value)} />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="modbus-probe-timeout">Port timeout (ms)</Label>
+            <Label htmlFor="modbus-probe-timeout" className="text-xs">PORT TIMEOUT (MS)</Label>
             <Input id="modbus-probe-timeout" type="number" min="10" max="2000" value={probeTimeout}
+              className="text-xs"
               disabled={loading || saving || !networkEnabled}
               onChange={(event: any) => setProbeTimeout(event.target.value)} />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="modbus-max-hosts">Maximum hosts per subnet</Label>
+            <Label htmlFor="modbus-max-hosts" className="text-xs">MAXIMUM HOSTS PER SUBNET</Label>
             <Input id="modbus-max-hosts" type="number" min="1" max="4096" value={maxHosts}
+              className="text-xs"
               disabled={loading || saving || !networkEnabled}
               onChange={(event: any) => setMaxHosts(event.target.value)} />
           </div>
         </div>
         {networkEnabled && !networkValid ? (
-          <div className="mt-3 text-xs text-destructive">Check the ports, unit IDs, timeout, and host limit.</div>
+          <div className="mt-3 text-red">CHECK THE PORTS, UNIT IDS, TIMEOUT, AND HOST LIMIT.</div>
         ) : null}
-      </div>
-      <div className="pt-4 text-xs text-muted-foreground">
-        A Modbus response proves that an address is readable, not that it has a meaningful value. Configure simulators to return ILLEGAL DATA ADDRESS outside their intended map for exact suggestions.
       </div>
     </div>
   );

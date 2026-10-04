@@ -50,7 +50,6 @@ private:
     void closeContextAndSetDisconnected();
     void handleOperationFailure(const std::string& operation_name);
     void publishConnectionError(const std::string& error_message);
-    void resolveConnectionError();
     void publishOperationError(const std::string& operation_name, const std::string& error_message);
 
     ModbusTCPClientModule* module_;
@@ -73,7 +72,6 @@ private:
     std::chrono::steady_clock::time_point last_connection_error_publication_{};
     std::chrono::steady_clock::time_point last_operation_error_publication_{};
     std::string last_connection_error_message_;
-    std::string connection_error_event_id_;
 };
 
 #endif

@@ -1,63 +1,15 @@
 import React from "@dartwic/interface-sdk/react";
 import { defineTaskConfig, useTaskConfigBridge } from "@dartwic/interface-sdk/tasks";
+import {Input, Label} from "@dartwic/interface-sdk/ui/general";
 import {
-  Button, Input, Label, ScrollArea, ScrollBar, Select, SelectContent,
-  SelectItem, SelectTrigger, SelectValue,
-} from "@dartwic/interface-sdk/ui/general";
-import {
-  ChannelComboBox,
   convertChannelReferenceToChannelName,
-  ModuleInstanceSelect,
+  TaskBindingTable,
 } from "@dartwic/interface-sdk/ui/dartwic";
 import {
   buildReadWritePayload, hasLegacyTaskArguments, normalizeReadMappings,
   normalizeReadbackInterval, normalizeWriteMappings, readRegisterTypes,
   stableStringify, writeRegisterTypes,
 } from "./shared";
-
-function MappingRow({ mapping, registerTypes, channelMode, onChange, onRemove }: any) {
-  return (
-    <div className="grid items-center gap-2 rounded-md border p-3" style={{ gridTemplateColumns: "180px 120px minmax(0, 1fr) auto" }}>
-      <Select value={mapping.registerType} onValueChange={(value: string) => onChange({ ...mapping, registerType: value })}>
-        <SelectTrigger><SelectValue /></SelectTrigger>
-        <SelectContent>
-          {registerTypes.map((type: any) => <SelectItem key={type.value} value={type.value}>{type.label}</SelectItem>)}
-        </SelectContent>
-      </Select>
-      <Input type="number" min="0" value={mapping.register} placeholder="ADDRESS"
-        onChange={(event: any) => onChange({ ...mapping, register: event.target.value })} />
-      <ChannelComboBox mode={channelMode} showFieldSelector={false} initialValue={mapping.channel}
-        placeholder="SELECT FIXED CHANNEL"
-        onSelect={(value: string) => onChange({ ...mapping, channel: convertChannelReferenceToChannelName(value) })}
-        className="min-w-0 w-full" />
-      <Button variant="ghost" onClick={onRemove}>REMOVE</Button>
-    </div>
-  );
-}
-
-function MappingSection({ title, mappings, setMappings, registerTypes, channelMode, idPrefix }: any) {
-  const nextId = React.useRef(0);
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <Label>{title}</Label>
-        <Button variant="outline" onClick={() => setMappings((current: any[]) => current.concat([{
-          id: `${idPrefix}-${nextId.current++}`,
-          registerType: registerTypes[0].value,
-          register: "",
-          channel: "",
-        }]))}>ADD</Button>
-      </div>
-      {mappings.length === 0 ? (
-        <div className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">NONE CONFIGURED</div>
-      ) : mappings.map((mapping: any, index: number) => (
-        <MappingRow key={mapping.id} mapping={mapping} registerTypes={registerTypes} channelMode={channelMode}
-          onChange={(next: any) => setMappings((current: any[]) => current.map((item, itemIndex) => itemIndex === index ? next : item))}
-          onRemove={() => setMappings((current: any[]) => current.filter((_, itemIndex) => itemIndex !== index))} />
-      ))}
-    </div>
-  );
-}
 
 function ModbusTaskConfig({ task, operation, onSaved, onClose, taskEditor }: any) {
   const isReadTask = task.task_type === "modbus_tcp_client.read";
@@ -86,6 +38,15 @@ function ModbusTaskConfig({ task, operation, onSaved, onClose, taskEditor }: any
           readback_interval_seconds: combined.readback_interval_seconds };
   }, [isReadTask, task]);
   const isDirty = stableStringify(payload) !== stableStringify(initialPayload);
+  const moduleConnection = React.useMemo(() => ({
+    pluginId: "modbus_tcp_client",
+    moduleTypeIds: ["tcp_client"],
+    value: selectedInstance,
+    onValueChange: setSelectedInstance,
+    placeholder: "SELECT ONE MODBUS CONNECTION",
+    description: "Each connection allows one read task and one write task.",
+    showConnectionStatus: true,
+  }), [selectedInstance]);
 
   async function saveTask() {
     if (!selectedInstance) return setErrorMessage("SELECT A MODBUS MODULE INSTANCE.");
@@ -112,6 +73,7 @@ function ModbusTaskConfig({ task, operation, onSaved, onClose, taskEditor }: any
   useTaskConfigBridge(taskEditor, {
     isDirty, isSaving, canSave: !legacy, errorMessage,
     saveLabel: "SAVE", cancelLabel: "CANCEL", onSave: saveTask, onCancel: onClose,
+    moduleConnection,
   });
 
   return (
@@ -119,31 +81,39 @@ function ModbusTaskConfig({ task, operation, onSaved, onClose, taskEditor }: any
       {legacy ? <div className="rounded-md border border-destructive p-3 text-sm text-destructive">
         Legacy Modbus task arguments are unsupported. Create a new Modbus read or write task.
       </div> : null}
-      <div className="space-y-2">
-        <Label>MODULE CONNECTION</Label>
-        <ModuleInstanceSelect
-          pluginId="modbus_tcp_client"
-          moduleTypeIds={["tcp_client"]}
-          value={selectedInstance}
-          onValueChange={setSelectedInstance}
-          placeholder="SELECT ONE MODBUS CONNECTION"
-        />
-        <div className="text-xs text-muted-foreground">Each connection allows one read task and one write task.</div>
-      </div>
       {!isReadTask ? <div className="space-y-2">
         <Label>READBACK INTERVAL SECONDS</Label>
         <Input type="number" min="0" step="0.1" value={readbackInterval}
           onChange={(event: any) => setReadbackInterval(event.target.value)} />
       </div> : null}
-      <ScrollArea className="min-h-0 flex-1" type="always">
-        <div className="space-y-6 pr-4">
-          {isReadTask ? <MappingSection title="READ MAPPINGS (DEVICE → RAPID)" mappings={readMappings} setMappings={setReadMappings}
-            registerTypes={readRegisterTypes} channelMode="write" idPrefix="read" /> : null}
-          {!isReadTask ? <MappingSection title="WRITE MAPPINGS (RAPID → DEVICE)" mappings={writeMappings} setMappings={setWriteMappings}
-            registerTypes={writeRegisterTypes} channelMode="read" idPrefix="write" /> : null}
-        </div>
-        <ScrollBar orientation="vertical" />
-      </ScrollArea>
+      {isReadTask ? <TaskBindingTable
+        title="READ MAPPINGS (DEVICE → RAPID)"
+        bindings={readMappings}
+        onBindingsChange={setReadMappings}
+        bindingTypes={readRegisterTypes}
+        channelMode="write"
+        normalizeChannelValue={convertChannelReferenceToChannelName}
+        createBinding={(sequence: number) => ({
+          id: `read-${sequence}`,
+          registerType: readRegisterTypes[0].value,
+          register: "",
+          channel: "",
+        })}
+      /> : null}
+      {!isReadTask ? <TaskBindingTable
+        title="WRITE MAPPINGS (RAPID → DEVICE)"
+        bindings={writeMappings}
+        onBindingsChange={setWriteMappings}
+        bindingTypes={writeRegisterTypes}
+        channelMode="read"
+        normalizeChannelValue={convertChannelReferenceToChannelName}
+        createBinding={(sequence: number) => ({
+          id: `write-${sequence}`,
+          registerType: writeRegisterTypes[0].value,
+          register: "",
+          channel: "",
+        })}
+      /> : null}
     </div>
   );
 }

@@ -310,18 +310,8 @@ ModbusTCPClientModule::ModbusTCPClientModule(nlohmann::json cfg, DARTWIC::API::S
           static_cast<uint32_t>(getParameter<int>("tv_sec", 0)),
           static_cast<uint32_t>(getParameter<int>("tv_usec", 200000)),
           getParameter<std::string>("event_system", "SOFTWARE"),
-          getParameter<std::string>("event_subsystem", "MODBUS")) {
-    if (getParameter<bool>("connection_monitor_enabled", true)) {
-        connection_monitor_thread_ = std::jthread([this](const std::stop_token stop_token) {
-            while (!stop_token.stop_requested()) {
-                monitorConnection();
-                for (int interval = 0; interval < 10 && !stop_token.stop_requested(); ++interval) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-            }
-        });
-    }
-}
+          getParameter<std::string>("event_subsystem", "MODBUS")),
+      connection_monitor_enabled_(getParameter<bool>("connection_monitor_enabled", true)) {}
 
 ModbusTCPClient& ModbusTCPClientModule::getTCPClient() {
     return client_;
@@ -332,7 +322,9 @@ std::mutex& ModbusTCPClientModule::connectionMutex() {
 }
 
 void ModbusTCPClientModule::monitorConnection() {
+    if (!connection_monitor_enabled_) return;
     std::scoped_lock lock(connection_mutex_);
+    dartwic->setChannel(instance_name_ + ".info.connected");
     client_.monitorConnection();
 }
 
@@ -348,6 +340,16 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
         });
     dartwic->registerLoop("device_discovery", "Modbus TCP Device Discovery", {
         .on_loop = [device_finder]() { device_finder->tick(); },
+        .target_frequency_hz = 1.0,
+    });
+    dartwic->registerLoop("connection_monitor", "Modbus TCP Connection Monitor", {
+        .on_loop = [this]() {
+            for (const auto& summary : dartwic->getModuleInstances("modbus_tcp_client")) {
+                const auto module = std::dynamic_pointer_cast<ModbusTCPClientModule>(
+                    dartwic->getModuleInstance(summary.name));
+                if (module) module->monitorConnection();
+            }
+        },
         .target_frequency_hz = 1.0,
     });
 

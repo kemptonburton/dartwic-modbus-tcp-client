@@ -14,6 +14,6 @@ The shutdown/restart regression was also tested live: stopping the simulator wit
 
 ## Release status
 
-This package is a draft pending compatible DARTWIC Engine and Interface releases (minimum beta.4). Published Engine beta.3 does not expose the required `isNotificationMuted` SDK method; current development builds do. The Interface must include the discovery presence-lease and notification-state fixes. Do not publish the draft until both compatible applications are released. These application changes remain local and are not included in this release.
+This package remains a development build targeting DARTWIC Engine and Interface beta.3. It depends on the current beta.3 development sources, including the `isNotificationMuted` SDK method and the discovery presence-lease and notification-state fixes. Do not publish it as a newer application compatibility level until the application release is intentionally advanced.
 
 The archive includes release/debug Windows engine plugins and the unchanged interface plugin payload. No DARTWIC Engine or Interface application builds are included.
