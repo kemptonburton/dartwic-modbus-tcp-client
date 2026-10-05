@@ -1,5 +1,8 @@
 {
-  "name" : "modbus-tcp-client-dartwic-module",
-  "version-string" : "1.0.0",
-  "dependencies" : [ "libmodbus", "nlohmann-json" ]
+  "name": "modbus-tcp-client-dartwic-module",
+  "version-string": "2.0.0",
+  "dependencies": [
+    "libmodbus",
+    "nlohmann-json"
+  ]
 }

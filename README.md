@@ -8,11 +8,11 @@ for the interface build. Packaging verifies `sdk-lock.json` before building.
 
 ## Settings storage
 
-Version 1.0.2 saves discovery overrides to the workspace's
+Version 2.0.0 saves discovery overrides to the workspace's
 `global_data/settings.json`, under `plugins.modbus_tcp_client.device_discovery`.
 The installed `plugin.json` remains the default configuration. This settings UI
-requires the updated storage-enabled development Engine; the original public
-Engine beta.3 download does not implement the new settings operations. Live
+requires DARTWIC Engine and Interface 2.0.0 or newer. Core 2.0.0 packages
+will be published separately from this plugin release. Live
 discovery/read/write tasks do not call the new native SDK virtual methods.
 
 ## Layout
