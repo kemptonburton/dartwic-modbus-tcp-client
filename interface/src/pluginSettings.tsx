@@ -1,5 +1,6 @@
 import React from "@dartwic/interface-sdk/react";
 import {Input, Label, Switch} from "@dartwic/interface-sdk/ui/general";
+import {createStorageClient} from "@dartwic/interface-sdk/storage";
 
 const pluginId = "modbus_tcp_client";
 
@@ -53,14 +54,14 @@ async function persistDiscovery(operation: any, startAddress: number, endAddress
   const readError = resultError(read, "Could not read the engine plugin manifest.");
   if (readError) throw new Error(readError);
   const manifest = JSON.parse(String(read?.payload?.content || "{}"));
-  const discovery = manifest.device_discovery && typeof manifest.device_discovery === "object"
-    ? manifest.device_discovery
-    : {};
+  const storage = createStorageClient(operation);
+  const snapshot = await storage.readEffectiveSettings({plugins: {[pluginId]: manifest}});
+  const discovery = snapshot.effective.plugins[pluginId].device_discovery || {};
   const existingTargets = Array.isArray(discovery.targets) ? discovery.targets : [];
   const firstTarget = existingTargets[0] && typeof existingTargets[0] === "object"
     ? existingTargets[0]
     : {host: "127.0.0.1", port: 502, unit_ids: [1, 255]};
-  manifest.device_discovery = {
+  const deviceDiscovery = {
     ...discovery,
     enabled: discovery.enabled !== false,
     network_scan: networkScan,
@@ -73,13 +74,9 @@ async function persistDiscovery(operation: any, startAddress: number, endAddress
       })),
     ],
   };
-  const saved = await operation("dartwic/save-file", {
-    rootDir: folder,
-    path: "plugin.json",
-    content: `${JSON.stringify(manifest, null, 2)}\n`,
-  }, 10000);
-  const saveError = resultError(saved, "Could not save the discovery settings.");
-  if (saveError) throw new Error(saveError);
+  await storage.writeSettingsOverride("workspace", {plugins: {[pluginId]: {
+    device_discovery: deviceDiscovery,
+  }}}, {revision: snapshot.revision});
 }
 
 export function ModbusPluginSettings({operation}: any) {
