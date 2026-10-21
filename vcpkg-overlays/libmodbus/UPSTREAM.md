@@ -1,0 +1,1 @@
+This port is copied without changes from microsoft/vcpkg commit `b73465f152a91ddaad6256c7d29ef000da18345b` (`ports/libmodbus`). It includes the upstream `fdsetsize-win32.diff` compatibility fix for Windows socket handles. Keep the port and its patches together when updating it.

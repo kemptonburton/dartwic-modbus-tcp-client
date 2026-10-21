@@ -223,8 +223,9 @@ void ModbusTCPClient::configureConnectedChannel() {
         DARTWIC::API::ChannelStorage::Fixed);
     module_->dartwic->upsertChannelField(channel, DARTWIC::API::ChannelField::UNITS, std::string{"bool"},
         DARTWIC::API::ChannelStorage::Fixed);
+    module_->dartwic->upsertChannelField(channel, DARTWIC::API::ChannelField::STALE_TIMEOUT, 3.0,
+        DARTWIC::API::ChannelStorage::Fixed);
     protocol_healthy_ = false;
-    connection_state_published_ = true;
 }
 
 void ModbusTCPClient::setConnected(bool connected) {
@@ -233,17 +234,21 @@ void ModbusTCPClient::setConnected(bool connected) {
 }
 
 void ModbusTCPClient::setProtocolHealthy(bool healthy) {
-    if (connection_state_published_ && protocol_healthy_ == healthy) return;
     protocol_healthy_ = healthy;
-    connection_state_published_ = true;
-    module_->dartwic->upsertChannelField(instance_name_ + ".info.connected",
-        DARTWIC::API::ChannelField::VALUE, healthy ? 1.0 : 0.0, DARTWIC::API::ChannelStorage::Fixed);
+}
+
+void ModbusTCPClient::publishConnectionState() {
+    // Only the connection-monitor loop owns this channel. Task transactions
+    // update internal health; the loop publishes it even when it is unchanged.
+    module_->dartwic->setChannel(instance_name_ + ".info.connected",
+        DARTWIC::API::ChannelValue{protocol_healthy_ ? 1.0 : 0.0});
 }
 
 void ModbusTCPClient::markProtocolResponsive() {
     consecutive_connection_failures_ = 0;
     next_reconnect_attempt_ = {};
     setProtocolHealthy(true);
+    last_protocol_response_ = std::chrono::steady_clock::now();
     last_connection_error_message_.clear();
 }
 
@@ -276,7 +281,13 @@ void ModbusTCPClient::monitorConnection() {
             : last_connection_error_message_);
         return;
     }
-    markProtocolResponsive();
+    if (protocol_healthy_ && std::chrono::steady_clock::now() - last_protocol_response_ < std::chrono::seconds(2)) return;
+    // A TCP socket alone does not prove the selected Modbus unit responds.
+    // An exception reply also proves liveness; a timeout does not.
+    uint16_t probe{};
+    clearModbusOperationError();
+    if (modbus_read_registers(context_, 0, 1, &probe) == 1) markProtocolResponsive();
+    else handleOperationFailure("connection_check");
 }
 
 bool ModbusTCPClient::connect() {
@@ -314,7 +325,6 @@ bool ModbusTCPClient::connect() {
     }
     ++reconnect_count_;
     setConnected(true);
-    markProtocolResponsive();
     return true;
 }
 
@@ -370,7 +380,8 @@ void ModbusTCPClient::publishConnectionError(const std::string& error_message) {
             std::to_string(server_port_) + ", unit " + std::to_string(unit_id_) + "]",
         {instance_name_ + ".info.connected"},
         "Verify the endpoint and device availability.",
-        0);
+        0,
+        10.0);
 }
 
 void ModbusTCPClient::publishOperationError(const std::string& operation_name, const std::string& error_message) {
@@ -383,7 +394,8 @@ void ModbusTCPClient::publishOperationError(const std::string& operation_name, c
         operation_name + ": " + error_message,
         {instance_name_ + ".info.connected"},
         "Verify mapped addresses, device state, and timeout settings.",
-        0
+        0,
+        10.0
     );
 }
 

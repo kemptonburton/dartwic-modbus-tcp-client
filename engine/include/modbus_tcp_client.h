@@ -27,6 +27,7 @@ public:
 
     bool ensureConnected();
     void monitorConnection();
+    void publishConnectionState();
     bool isConnected() const noexcept { return connected_; }
     void disconnect();
 
@@ -64,11 +65,11 @@ private:
     std::string event_subsystem_;
     bool connected_{false};
     bool protocol_healthy_{false};
-    bool connection_state_published_{false};
     uint64_t reconnect_count_{0};
     uint64_t failure_count_{0};
     uint32_t consecutive_connection_failures_{0};
     std::chrono::steady_clock::time_point next_reconnect_attempt_{};
+    std::chrono::steady_clock::time_point last_protocol_response_{};
     std::chrono::steady_clock::time_point last_connection_error_publication_{};
     std::chrono::steady_clock::time_point last_operation_error_publication_{};
     std::string last_connection_error_message_;

@@ -3,6 +3,7 @@
 #include "modbus_register_scanner.h"
 
 #include <modules/BaseModule.h>
+#include <discovery/DiscoveryResources.h>
 
 #include <algorithm>
 #include <cctype>
@@ -609,7 +610,8 @@ void ModbusDeviceFinder::tick() {
                         error.what(),
                         {},
                         "Verify the interface UI request broker and module-discovery registration.",
-                        0);
+                        0,
+                        10.0);
                     next_announcement_error_ = now + std::chrono::seconds(30);
                 }
             }
@@ -807,6 +809,17 @@ void ModbusDeviceFinder::announce(const Target& target, int unit_id, const nlohm
         });
     }
 
+    const DARTWIC::API::DiscoveryResources module_resources{
+        .channels = {{"{instance}.info.connected", "Connection status", "input"}},
+    };
+    auto taskResources = [](const std::string& task_suffix) {
+        DARTWIC::API::DiscoveryResources resources;
+        for (const auto* suffix : {"transaction_time_ms", "stale", "failure_count", "reconnect_count"}) {
+            resources.channels.push_back({"{instance}" + task_suffix + ".modbus." + suffix, suffix, "input"});
+        }
+        return resources.toJson();
+    };
+
     auto discovery_request = api_->requestInterfaceUi("dartwic.module-discovery", {
         {"presence", {{"available", true}, {"valid_until_unix_ms", clock_() + 15000}}},
         {"discovery_id", discovery_id},
@@ -822,6 +835,7 @@ void ModbusDeviceFinder::announce(const Target& target, int unit_id, const nlohm
         {"channels", channels},
         {"provisioning", {
             {"module_type", "tcp_client"},
+            {"resources", module_resources.toJson()},
             {"suggested_instance_name", instance_name},
             {"parameters", {
                 {"server_ip", target.host}, {"server_port", target.port}, {"unit_id", unit_id},
@@ -843,14 +857,16 @@ void ModbusDeviceFinder::announce(const Target& target, int unit_id, const nlohm
                         {"label", "Read"},
                         {"name_suffix", "_read"},
                         {"task_type", "read"},
-                        {"argument_key", "read_mappings"}
+                        {"argument_key", "read_mappings"},
+                        {"resources", taskResources("_read")}
                     },
                     {
                         {"id", "write"},
                         {"label", "Write"},
                         {"name_suffix", "_write"},
                         {"task_type", "write"},
-                        {"argument_key", "write_mappings"}
+                        {"argument_key", "write_mappings"},
+                        {"resources", taskResources("_write")}
                     }
                 })}
             }},

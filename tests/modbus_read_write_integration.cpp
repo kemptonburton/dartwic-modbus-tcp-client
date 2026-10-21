@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #else
+#include <sys/select.h>
 #include <sys/socket.h>
 #endif
 
@@ -21,6 +22,19 @@
 
 namespace {
 using namespace DARTWIC::API;
+
+bool waitForConnection(int socket) {
+    if (socket < 0) return false;
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(socket, &readable);
+    timeval timeout{3, 0};
+#ifdef _WIN32
+    return select(0, &readable, nullptr, nullptr, &timeout) > 0;
+#else
+    return select(socket + 1, &readable, nullptr, nullptr, &timeout) > 0;
+#endif
+}
 
 double numeric(const ChannelValue& value) {
     return std::visit([](const auto& item) -> double {
@@ -54,6 +68,7 @@ public:
     }
     void removeRuntimeContext(const std::string& key) override { contexts_.erase(key); }
     void clearRuntimeContext() override { contexts_.clear(); }
+    void recordWorkerCycle() override {}
 private:
     std::string name_;
     std::string type_;
@@ -103,6 +118,20 @@ public:
         if (field == ChannelField::VALUE) values[channel] = std::move(value);
         storages[channel] = storage;
     }
+    FixedChannelHandle createFixedChannel(const std::string& channel, double initial_value) override {
+        std::scoped_lock lock(mutex_);
+        if (!values.contains(channel)) values[channel] = initial_value;
+        storages[channel] = ChannelStorage::Fixed;
+        return FixedChannelHandle{0, 1, std::make_shared<const std::string>(channel), this};
+    }
+    double queryChannel(const FixedChannelHandle& handle, double default_value) override {
+        return queryChannelField(*handle.channel, ChannelField::VALUE, ChannelValue{default_value});
+    }
+    bool upsertChannel(const FixedChannelHandle& handle, double value,
+        std::optional<uint64_t>) override {
+        upsertChannelField(*handle.channel, ChannelField::VALUE, value, ChannelStorage::Fixed);
+        return true;
+    }
     bool removeChannel(const std::string& channel) override {
         std::scoped_lock lock(mutex_);
         storages.erase(channel);
@@ -112,22 +141,26 @@ public:
         module_type = std::move(definition);
         return "dartwic.modbus-tcp-client." + module_type.id;
     }
-    std::string registerShareTransport(ShareTransportDefinition) override { return {}; }
+    std::string registerPeer(PeerDefinition) override { return {}; }
     std::string registerTaskType(std::string local_id, std::string, TaskTypeDefinition definition) override {
         task_types[local_id] = std::move(definition);
         return "dartwic.modbus-tcp-client." + local_id;
     }
-    std::string registerOperation(std::string, std::string, OperationHandler) override { return {}; }
+    std::string registerOperation(OperationDefinition) override { return {}; }
+    std::string registerTelemetry(TelemetryDefinition) override { return {}; }
     std::string registerDCodeFunction(std::string, std::string, DCodeFunctionHandler, std::string,
-        std::vector<DCodeFunctionArgument>, std::vector<DCodeFunctionArgument>) override { return {}; }
+        std::vector<DCodeFunctionArgument>, std::vector<DCodeFunctionArgument>,
+        DCodePreparedFunctionHandler) override { return {}; }
     std::string registerLoop(std::string local_id, std::string, PluginLoopDefinition definition) override {
         loops[local_id] = std::move(definition);
         return "modbus_tcp_client." + local_id;
     }
-    int consoleError(std::string title, std::string description, std::vector<std::string>, std::string, int) override {
+    int consoleError(std::string title, std::string description, std::vector<std::string>, std::string, int,
+        double separation_seconds) override {
         std::scoped_lock lock(mutex_);
         last_error_title = std::move(title);
         last_error_description = std::move(description);
+        last_error_separation_seconds = separation_seconds;
         ++error_count;
         return error_count;
     }
@@ -158,16 +191,11 @@ public:
         upsertChannelField(channel, ChannelField::VALUE, std::move(value), ChannelStorage::Fixed);
     }
     void setChannel(const std::string& channel, std::optional<ChannelValue> value) override {
+        ++set_channel_count;
         if (value) upsertChannelField(channel, ChannelField::VALUE, std::move(*value), ChannelStorage::Fixed);
     }
     void claimChannel(const std::string&) override {}
     void freeChannel(const std::string&) override {}
-    FixedChannelBatch resolveFixedChannels(const std::vector<std::string>& channels) override {
-        return {channels, std::vector<FixedChannelHandle>(channels.size())};
-    }
-    void queryFixedChannelValues(const FixedChannelBatch&, std::span<double>, double) override {}
-    void upsertFixedChannelValues(const FixedChannelBatch&, std::span<const double>,
-        std::optional<uint64_t>) override {}
 
     ChannelValue value(const std::string& channel) {
         std::scoped_lock lock(mutex_);
@@ -195,8 +223,10 @@ public:
     std::unordered_map<std::string, PluginLoopDefinition> loops;
     std::vector<ModuleInstanceSummary> module_summaries;
     int error_count{0};
+    int set_channel_count{0};
     std::string last_error_title;
     std::string last_error_description;
+    double last_error_separation_seconds{0.0};
     int argus_event_count{0};
     nlohmann::json last_argus_event = nlohmann::json::object();
     std::string active_event_id;
@@ -213,12 +243,16 @@ public:
         mapping_->tab_input_registers[10] = 321;
         worker_ = std::thread([this]() {
             int socket = modbus_tcp_listen(context_, 1);
-            if (socket < 0 || modbus_tcp_accept(context_, &socket) < 0) {
+            if (socket < 0 || !waitForConnection(socket) || modbus_tcp_accept(context_, &socket) < 0) {
                 failed_.store(true);
                 return;
             }
             uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]{};
             for (int request = 0; request < 2; ++request) {
+                if (!waitForConnection(modbus_get_socket(context_))) {
+                    failed_.store(true);
+                    return;
+                }
                 const int length = modbus_receive(context_, query);
                 if (length <= 0 || modbus_reply(context_, query, length, mapping_) < 0) {
                     failed_.store(true);
@@ -353,6 +387,77 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+class ConnectionProbeSimulator {
+public:
+    enum class Mode { Responsive, Silent, Exception };
+    ConnectionProbeSimulator(int port, Mode mode) {
+        context_ = modbus_new_tcp("127.0.0.1", port);
+        mapping_ = modbus_mapping_new(1, 1, 1, 1);
+        if (!context_ || !mapping_) throw std::runtime_error("Unable to create connection probe simulator");
+        worker_ = std::thread([this, mode]() {
+            int server = modbus_tcp_listen(context_, 1);
+            if (server < 0 || !waitForConnection(server) || modbus_tcp_accept(context_, &server) < 0) return;
+            uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]{};
+            if (!waitForConnection(modbus_get_socket(context_))) return;
+            const int length = modbus_receive(context_, query);
+            if (length <= 0) return;
+            if (mode == Mode::Responsive) modbus_reply(context_, query, length, mapping_);
+            if (mode == Mode::Exception) modbus_reply_exception(context_, query, MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS);
+            while (!stop_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ~ConnectionProbeSimulator() {
+        stop_.store(true);
+        if (worker_.joinable()) worker_.join();
+        modbus_mapping_free(mapping_);
+        modbus_close(context_);
+        modbus_free(context_);
+    }
+private:
+    modbus_t* context_{};
+    modbus_mapping_t* mapping_{};
+    std::thread worker_;
+    std::atomic<bool> stop_{false};
+};
+
+void testConnectionMonitor() {
+    const int base_port = 23000 + static_cast<int>(
+        std::chrono::steady_clock::now().time_since_epoch().count() % 1000);
+    using Mode = ConnectionProbeSimulator::Mode;
+    for (const auto mode : {Mode::Responsive, Mode::Silent, Mode::Exception}) {
+        const int port = base_port + static_cast<int>(mode);
+        ConnectionProbeSimulator simulator(port, mode);
+        MockApi api;
+        ModbusTCPClientPlugin plugin(nlohmann::json::object(), &api);
+        auto module = std::shared_ptr<DARTWIC::Modules::BaseModule>(plugin.createModule("tcp_client", {
+            {"name", "probe"}, {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", port},
+                {"unit_id", 1}, {"tv_sec", 0}, {"tv_usec", 50000}}}
+        }, &api));
+        auto typed = std::dynamic_pointer_cast<ModbusTCPClientModule>(module);
+        require(static_cast<bool>(typed), "Connection probe module was not created");
+        typed->monitorConnection();
+        const double expected = mode == Mode::Silent ? 0.0 : 1.0;
+        require(numeric(api.value("probe.info.connected")) == expected,
+            "TCP acceptance without a Modbus response must not publish connected");
+        const int publications = api.set_channel_count;
+        typed->monitorConnection();
+        require(api.set_channel_count == publications + 1,
+            "Every monitor tick must publish its current health, including unchanged health");
+        require(numeric(api.value("probe.info.connected")) == expected,
+            "The monitor restored connected health without a verified response");
+        if (mode != Mode::Silent) {
+            // Model a task detecting a loss after the monitor owns the channel.
+            // The next loop tick must publish the new internal health itself.
+            typed->getTCPClient().disconnect();
+            typed->monitorConnection();
+            require(numeric(api.value("probe.info.connected")) == 0.0,
+                "The monitor retained the last green value after task-side disconnect");
+        }
+    }
+    std::cout << "Connection monitor publication and protocol verification passed." << std::endl;
+}
+
 void testDiscoveryLifecycle() {
     MockApi api;
     int scans = 0;
@@ -377,6 +482,17 @@ void testDiscoveryLifecycle() {
     api.discovery_muted = false;
     finder.tick();
     require(scans == 1 && api.discovery_requests == 1, "Unmute must offer the device exactly once");
+    const auto& provisioning = api.discovery_request.at("payload").at("provisioning");
+    const auto& resources = provisioning.at("resources");
+    require(resources.at("channels").size() == 1 && resources.at("loops").empty() &&
+        resources.at("channels").at(0).at("name") == "{instance}.info.connected",
+        "Discovery must separate module connection status from task diagnostics");
+    for (const auto& task : provisioning.at("channel_suggestion_editor").at("tasks")) {
+        const auto& diagnostics = task.at("resources").at("channels");
+        require(diagnostics.size() == 4 && diagnostics.at(0).at("name") ==
+            "{instance}" + task.at("name_suffix").get<std::string>() + ".modbus.transaction_time_ms",
+            "Each Modbus task must preview its own diagnostic channels");
+    }
     const auto& options = api.discovery_request["options"];
     require(options["silenceable"] == true && options["mute_scope"] == "engine",
         "Discovery must expose engine-scoped mute");
@@ -446,9 +562,14 @@ void testDiscoveryLifecycle() {
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string(argv[1]) == "--connection-only") {
+            testConnectionMonitor();
+            return 0;
+        }
         testDiscoveryLifecycle();
+        if (argc > 1 && std::string(argv[1]) == "--discovery-only") return 0;
         const int port = 15000 + static_cast<int>(
             std::chrono::steady_clock::now().time_since_epoch().count() % 1000);
         Simulator simulator(port);
@@ -457,7 +578,7 @@ int main() {
         plugin.onPluginLoaded();
         auto module = std::shared_ptr<DARTWIC::Modules::BaseModule>(plugin.createModule("tcp_client", {
             {"name", "simulator"},
-            {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", port},
+            {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", port}, {"unit_id", 1},
                 {"tv_sec", 0}, {"tv_usec", 200000}, {"connection_monitor_enabled", false}}}
         }, &api));
         api.modules["simulator"] = module;
@@ -484,10 +605,14 @@ int main() {
         require(write_runtime.fixed_input_channels_ == std::vector<std::string>{"command.valve"},
             "Modbus configuration did not declare its fixed command snapshot");
         api.upsertChannelField("command.valve", ChannelField::VALUE, 55.0, ChannelStorage::Fixed);
-        read_type.on_start(read_type, read_runtime);
+        if (read_type.on_start) read_type.on_start(read_type, read_runtime);
         read_type.on_task(read_type, read_runtime, 0.01);
         write_type.on_start(write_type, write_runtime);
         write_type.on_task(write_type, write_runtime, 0.01);
+        if (api.error_count > 0) {
+            require(api.last_error_separation_seconds == 10.0,
+                "Modbus connection errors need explicit ARGUS firing separation");
+        }
         if (simulator.failed()) throw std::runtime_error("Modbus simulator transaction failed");
         require(simulator.holding(20) == 55, "Command snapshot was not written");
         require(numeric(api.value("sensor.pressure")) == 321.0, "Sensor input was not published");
@@ -521,6 +646,7 @@ int main() {
         require(third_recovery_read && recovery_values[0] == 777,
             "Modbus client did not recover after bounded reconnect backoff");
         require(!timeout_recovery_simulator.failed(), "Timeout-recovery simulator failed");
+        recovery_client.publishConnectionState();
         require(numeric(api.value("recovery.info.connected")) == 1.0,
             "Protocol recovery did not publish connected health");
 
@@ -538,12 +664,14 @@ int main() {
         std::vector<uint16_t> disconnect_values(1, 0);
         require(disconnect_client.readInputRegisters(0, disconnect_values) && disconnect_values[0] == 909,
             "Disconnect-test client did not establish initial protocol health");
+        disconnect_client.publishConnectionState();
         require(numeric(api.value("disconnect.info.connected")) == 1.0,
             "Initial successful transaction did not publish connected health");
         require(disconnect_simulator.waitForDrop(), "Disconnect-test server did not close its client socket");
         const int events_before_disconnect = api.argus_event_count;
         require(!disconnect_client.readInputRegisters(0, disconnect_values),
             "Transaction unexpectedly succeeded after the server closed its socket");
+        disconnect_client.publishConnectionState();
         require(!disconnect_client.isConnected() && numeric(api.value("disconnect.info.connected")) == 0.0,
             "Server disconnect did not immediately clear client and RAPID connection state");
         require(api.argus_event_count > events_before_disconnect &&

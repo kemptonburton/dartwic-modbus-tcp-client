@@ -68,18 +68,11 @@ async function buildEngine(pluginId) {
     ]);
     return;
   }
-  await runCommand("cmake", [
-    "-S",
-    ".",
-    "-B",
-    "cmake-build-release",
-    "-DCMAKE_BUILD_TYPE=Release",
-  ]);
+  await runCommand("cmake", ["--preset", "linux-clang-release"]);
   await runCommand("cmake", [
     "--build",
-    "cmake-build-release",
-    "--config",
-    "Release",
+    "--preset",
+    "build-linux-clang-release",
     "--target",
     "copy_engine_plugin",
   ]);
@@ -98,18 +91,11 @@ async function buildEngineDebug(pluginId) {
     ]);
     return;
   }
-  await runCommand("cmake", [
-    "-S",
-    ".",
-    "-B",
-    "cmake-build-debug",
-    "-DCMAKE_BUILD_TYPE=Debug",
-  ]);
+  await runCommand("cmake", ["--preset", "linux-clang-debug"]);
   await runCommand("cmake", [
     "--build",
-    "cmake-build-debug",
-    "--config",
-    "Debug",
+    "--preset",
+    "build-linux-clang-debug",
     "--target",
     "copy_engine_plugin",
   ]);
@@ -186,6 +172,13 @@ async function createPluginArchive() {
 
 async function main() {
   await verifySdkLock();
+  const localVcpkgRoot = path.resolve(repoRoot, "vcpkg");
+  if (!process.env.VCPKG_ROOT && await pathExists(path.join(localVcpkgRoot, "scripts", "buildsystems", "vcpkg.cmake"))) {
+    process.env.VCPKG_ROOT = localVcpkgRoot;
+  }
+  if (!process.env.VCPKG_ROOT) {
+    throw new Error("Set VCPKG_ROOT or initialize this repository's vcpkg checkout before packaging.");
+  }
   const argv = process.argv.slice(2);
   const requestedVersion = getRequestedVersion(argv);
   if (requestedVersion) {

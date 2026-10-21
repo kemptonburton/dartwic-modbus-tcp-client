@@ -12,8 +12,8 @@ Version 2.0.0 saves discovery overrides to the workspace's
 `global_data/settings.json`, under `plugins.modbus_tcp_client.device_discovery`.
 The installed `plugin.json` remains the default configuration. This settings UI
 requires DARTWIC Engine and Interface 2.0.0 or newer. Core 2.0.0 packages
-will be published separately from this plugin release. Live
-discovery/read/write tasks do not call the new native SDK virtual methods.
+will be published separately from this plugin release. The read/write tasks
+require the 2.0 fixed-channel handle API; use the matching engine release.
 
 ## Layout
 
@@ -44,10 +44,15 @@ The outputs are written to:
 - `plugin/engine-debug/modbus_tcp_client` when built in Debug or during `npm run package`
 - `plugin/interface/modbus_tcp_client`
 
+## Windows Modbus dependency
+
+The repository's `vcpkg-configuration.json` selects the bundled upstream libmodbus 3.2.0 port in `vcpkg-overlays/libmodbus`. That official vcpkg port includes the Windows `FD_SETSIZE` fix: Windows socket handles are not POSIX descriptor indexes and must not be rejected solely because their numeric value exceeds 64. The pinned source revision is recorded in the overlay's `UPSTREAM.md`; keep its port files and patches together when updating. Native dependency changes require rebuilding and redeploying the engine plugin and its runtime DLL, then restarting the engine.
+
 ## Versioning and packaging
 
 - `npm version patch|minor|major|<exact-version>` updates `package.json`, syncs `plugin.json`, and records the current compatibility floor in `versions.json`
 - `npm run package` builds release engine, attempts debug engine, builds interface when present, and writes `plugin.zip`
+- On Linux, `npm run package` uses the `linux-clang-release` CMake preset. Set `VCPKG_ROOT` to a vcpkg checkout or initialize the repository's `vcpkg` submodule. The archive includes the plugin's native library; verify libmodbus and other dynamic dependencies on the target distribution.
 - `npm run package -- 0.8.1` bumps to that exact version before packaging
 
 `deployment-settings.json` controls explicit deploy targets:
@@ -80,6 +85,21 @@ Build behavior:
   `modbus_tcp_client.write`.
 - Module instances live separately under `modules/*.json`.
 
+### Periodic I/O and diagnostics
+
+Configuration groups adjacent registers, allocates reusable transaction buffers,
+declares the write task's fixed command inputs, and retains fixed RAPID handles
+for mapped channels and task diagnostics. Each write tick reads its command
+handles before taking the module connection mutex. Device transactions run
+synchronously under that mutex; completed reads and readbacks are published
+after it is released. The task does not parse mappings or resolve channel names
+on each tick. Network timeout and reconnect behavior still bound the achievable
+period, so a configured task period is not a Modbus response guarantee.
+
+Connection and transaction errors use ARGUS's explicit 10-second firing
+separation. Repeated accepted reports refresh one occurrence; the separation
+does not replace the Modbus reconnect delay or the request timeout.
+
 ## Compatibility
 
 - engine loading is gated by `minEngineVersion`
@@ -88,3 +108,9 @@ Build behavior:
 - release DARTWIC consumes only `plugin/engine/modbus_tcp_client`
 - debug DARTWIC consumes only `plugin/engine-debug/modbus_tcp_client`
 - there is no fallback between release and debug engine variants
+
+## Discovery setup presentation
+
+Discovery uses the shared SDK resource descriptors: module connection status is listed under the module, while each read/write task owns four diagnostic channels. Address selections expose channel pickers in an expandable name list; required channels use checked, disabled rows. Review stays compact. The connection monitor is a shared plugin loop rather than a loop created per module. Channel name choices remain in the provisioning draft until Apply.
+
+The connection monitor owns and republishes `{instance}.info.connected` each second, with a three-second stale timeout. Task transactions update internal health without writing a loop-owned channel. A TCP connect alone stays unverified: successful transactions or valid Modbus exception replies establish protocol liveness. When no response has been verified for two seconds, the monitor performs a read-only holding-register probe at address zero using the configured transaction timeout. A mapping exception can coexist with a healthy connection; timeout or socket loss clears health.
