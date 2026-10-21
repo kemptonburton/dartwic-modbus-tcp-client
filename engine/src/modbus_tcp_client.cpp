@@ -370,7 +370,8 @@ void ModbusTCPClient::publishConnectionError(const std::string& error_message) {
             std::to_string(server_port_) + ", unit " + std::to_string(unit_id_) + "]",
         {instance_name_ + ".info.connected"},
         "Verify the endpoint and device availability.",
-        0);
+        0,
+        10.0);
 }
 
 void ModbusTCPClient::publishOperationError(const std::string& operation_name, const std::string& error_message) {
@@ -383,7 +384,8 @@ void ModbusTCPClient::publishOperationError(const std::string& operation_name, c
         operation_name + ": " + error_message,
         {instance_name_ + ".info.connected"},
         "Verify mapped addresses, device state, and timeout settings.",
-        0
+        0,
+        10.0
     );
 }
 

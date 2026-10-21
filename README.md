@@ -12,8 +12,8 @@ Version 2.0.0 saves discovery overrides to the workspace's
 `global_data/settings.json`, under `plugins.modbus_tcp_client.device_discovery`.
 The installed `plugin.json` remains the default configuration. This settings UI
 requires DARTWIC Engine and Interface 2.0.0 or newer. Core 2.0.0 packages
-will be published separately from this plugin release. Live
-discovery/read/write tasks do not call the new native SDK virtual methods.
+will be published separately from this plugin release. The read/write tasks
+require the 2.0 fixed-channel handle API; use the matching engine release.
 
 ## Layout
 
@@ -48,6 +48,7 @@ The outputs are written to:
 
 - `npm version patch|minor|major|<exact-version>` updates `package.json`, syncs `plugin.json`, and records the current compatibility floor in `versions.json`
 - `npm run package` builds release engine, attempts debug engine, builds interface when present, and writes `plugin.zip`
+- On Linux, `npm run package` uses the `linux-clang-release` CMake preset. Set `VCPKG_ROOT` to a vcpkg checkout or initialize the repository's `vcpkg` submodule. The archive includes the plugin's native library; verify libmodbus and other dynamic dependencies on the target distribution.
 - `npm run package -- 0.8.1` bumps to that exact version before packaging
 
 `deployment-settings.json` controls explicit deploy targets:
@@ -79,6 +80,21 @@ Build behavior:
 - It exposes task types `modbus_tcp_client.read` and
   `modbus_tcp_client.write`.
 - Module instances live separately under `modules/*.json`.
+
+### Periodic I/O and diagnostics
+
+Configuration groups adjacent registers, allocates reusable transaction buffers,
+declares the write task's fixed command inputs, and retains fixed RAPID handles
+for mapped channels and task diagnostics. Each write tick reads its command
+handles before taking the module connection mutex. Device transactions run
+synchronously under that mutex; completed reads and readbacks are published
+after it is released. The task does not parse mappings or resolve channel names
+on each tick. Network timeout and reconnect behavior still bound the achievable
+period, so a configured task period is not a Modbus response guarantee.
+
+Connection and transaction errors use ARGUS's explicit 10-second firing
+separation. Repeated accepted reports refresh one occurrence; the separation
+does not replace the Modbus reconnect delay or the request timeout.
 
 ## Compatibility
 

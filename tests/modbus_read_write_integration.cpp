@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #else
+#include <sys/select.h>
 #include <sys/socket.h>
 #endif
 
@@ -21,6 +22,19 @@
 
 namespace {
 using namespace DARTWIC::API;
+
+bool waitForConnection(int socket) {
+    if (socket < 0) return false;
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(socket, &readable);
+    timeval timeout{3, 0};
+#ifdef _WIN32
+    return select(0, &readable, nullptr, nullptr, &timeout) > 0;
+#else
+    return select(socket + 1, &readable, nullptr, nullptr, &timeout) > 0;
+#endif
+}
 
 double numeric(const ChannelValue& value) {
     return std::visit([](const auto& item) -> double {
@@ -54,6 +68,7 @@ public:
     }
     void removeRuntimeContext(const std::string& key) override { contexts_.erase(key); }
     void clearRuntimeContext() override { contexts_.clear(); }
+    void recordWorkerCycle() override {}
 private:
     std::string name_;
     std::string type_;
@@ -103,6 +118,20 @@ public:
         if (field == ChannelField::VALUE) values[channel] = std::move(value);
         storages[channel] = storage;
     }
+    FixedChannelHandle createFixedChannel(const std::string& channel, double initial_value) override {
+        std::scoped_lock lock(mutex_);
+        if (!values.contains(channel)) values[channel] = initial_value;
+        storages[channel] = ChannelStorage::Fixed;
+        return FixedChannelHandle{0, 1, std::make_shared<const std::string>(channel), this};
+    }
+    double queryChannel(const FixedChannelHandle& handle, double default_value) override {
+        return queryChannelField(*handle.channel, ChannelField::VALUE, ChannelValue{default_value});
+    }
+    bool upsertChannel(const FixedChannelHandle& handle, double value,
+        std::optional<uint64_t>) override {
+        upsertChannelField(*handle.channel, ChannelField::VALUE, value, ChannelStorage::Fixed);
+        return true;
+    }
     bool removeChannel(const std::string& channel) override {
         std::scoped_lock lock(mutex_);
         storages.erase(channel);
@@ -112,22 +141,26 @@ public:
         module_type = std::move(definition);
         return "dartwic.modbus-tcp-client." + module_type.id;
     }
-    std::string registerShareTransport(ShareTransportDefinition) override { return {}; }
+    std::string registerPeer(PeerDefinition) override { return {}; }
     std::string registerTaskType(std::string local_id, std::string, TaskTypeDefinition definition) override {
         task_types[local_id] = std::move(definition);
         return "dartwic.modbus-tcp-client." + local_id;
     }
-    std::string registerOperation(std::string, std::string, OperationHandler) override { return {}; }
+    std::string registerOperation(OperationDefinition) override { return {}; }
+    std::string registerTelemetry(TelemetryDefinition) override { return {}; }
     std::string registerDCodeFunction(std::string, std::string, DCodeFunctionHandler, std::string,
-        std::vector<DCodeFunctionArgument>, std::vector<DCodeFunctionArgument>) override { return {}; }
+        std::vector<DCodeFunctionArgument>, std::vector<DCodeFunctionArgument>,
+        DCodePreparedFunctionHandler) override { return {}; }
     std::string registerLoop(std::string local_id, std::string, PluginLoopDefinition definition) override {
         loops[local_id] = std::move(definition);
         return "modbus_tcp_client." + local_id;
     }
-    int consoleError(std::string title, std::string description, std::vector<std::string>, std::string, int) override {
+    int consoleError(std::string title, std::string description, std::vector<std::string>, std::string, int,
+        double separation_seconds) override {
         std::scoped_lock lock(mutex_);
         last_error_title = std::move(title);
         last_error_description = std::move(description);
+        last_error_separation_seconds = separation_seconds;
         ++error_count;
         return error_count;
     }
@@ -162,12 +195,6 @@ public:
     }
     void claimChannel(const std::string&) override {}
     void freeChannel(const std::string&) override {}
-    FixedChannelBatch resolveFixedChannels(const std::vector<std::string>& channels) override {
-        return {channels, std::vector<FixedChannelHandle>(channels.size())};
-    }
-    void queryFixedChannelValues(const FixedChannelBatch&, std::span<double>, double) override {}
-    void upsertFixedChannelValues(const FixedChannelBatch&, std::span<const double>,
-        std::optional<uint64_t>) override {}
 
     ChannelValue value(const std::string& channel) {
         std::scoped_lock lock(mutex_);
@@ -197,6 +224,7 @@ public:
     int error_count{0};
     std::string last_error_title;
     std::string last_error_description;
+    double last_error_separation_seconds{0.0};
     int argus_event_count{0};
     nlohmann::json last_argus_event = nlohmann::json::object();
     std::string active_event_id;
@@ -213,12 +241,16 @@ public:
         mapping_->tab_input_registers[10] = 321;
         worker_ = std::thread([this]() {
             int socket = modbus_tcp_listen(context_, 1);
-            if (socket < 0 || modbus_tcp_accept(context_, &socket) < 0) {
+            if (socket < 0 || !waitForConnection(socket) || modbus_tcp_accept(context_, &socket) < 0) {
                 failed_.store(true);
                 return;
             }
             uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]{};
             for (int request = 0; request < 2; ++request) {
+                if (!waitForConnection(modbus_get_socket(context_))) {
+                    failed_.store(true);
+                    return;
+                }
                 const int length = modbus_receive(context_, query);
                 if (length <= 0 || modbus_reply(context_, query, length, mapping_) < 0) {
                     failed_.store(true);
@@ -457,7 +489,7 @@ int main() {
         plugin.onPluginLoaded();
         auto module = std::shared_ptr<DARTWIC::Modules::BaseModule>(plugin.createModule("tcp_client", {
             {"name", "simulator"},
-            {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", port},
+            {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", port}, {"unit_id", 1},
                 {"tv_sec", 0}, {"tv_usec", 200000}, {"connection_monitor_enabled", false}}}
         }, &api));
         api.modules["simulator"] = module;
@@ -484,10 +516,14 @@ int main() {
         require(write_runtime.fixed_input_channels_ == std::vector<std::string>{"command.valve"},
             "Modbus configuration did not declare its fixed command snapshot");
         api.upsertChannelField("command.valve", ChannelField::VALUE, 55.0, ChannelStorage::Fixed);
-        read_type.on_start(read_type, read_runtime);
+        if (read_type.on_start) read_type.on_start(read_type, read_runtime);
         read_type.on_task(read_type, read_runtime, 0.01);
         write_type.on_start(write_type, write_runtime);
         write_type.on_task(write_type, write_runtime, 0.01);
+        if (api.error_count > 0) {
+            require(api.last_error_separation_seconds == 10.0,
+                "Modbus connection errors need explicit ARGUS firing separation");
+        }
         if (simulator.failed()) throw std::runtime_error("Modbus simulator transaction failed");
         require(simulator.holding(20) == 55, "Command snapshot was not written");
         require(numeric(api.value("sensor.pressure")) == 321.0, "Sensor input was not published");

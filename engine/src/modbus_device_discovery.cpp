@@ -609,7 +609,8 @@ void ModbusDeviceFinder::tick() {
                         error.what(),
                         {},
                         "Verify the interface UI request broker and module-discovery registration.",
-                        0);
+                        0,
+                        10.0);
                     next_announcement_error_ = now + std::chrono::seconds(30);
                 }
             }
