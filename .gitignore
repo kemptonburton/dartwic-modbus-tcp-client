@@ -7,3 +7,5 @@ plugin.zip
 
 # Other
 .idea/
+/plugin-*.zip
+/release-manifest.json
