@@ -155,30 +155,15 @@ public:
         loops[local_id] = std::move(definition);
         return "modbus_tcp_client." + local_id;
     }
-    int consoleError(std::string title, std::string description, std::vector<std::string>, std::string, int,
+    int consoleError(std::string title, std::string description, std::vector<std::string>, std::string, int auto_acknowledge,
         double separation_seconds) override {
         std::scoped_lock lock(mutex_);
         last_error_title = std::move(title);
         last_error_description = std::move(description);
         last_error_separation_seconds = separation_seconds;
+        last_error_auto_acknowledge = auto_acknowledge;
         ++error_count;
         return error_count;
-    }
-    nlohmann::json recordEvent(nlohmann::json event) override {
-        std::scoped_lock lock(mutex_);
-        ++argus_event_count;
-        last_argus_event = std::move(event);
-        last_argus_event["event_id"] = "event_" + last_argus_event.value("correlation_key", std::string{"modbus"});
-        active_event_id = last_argus_event["event_id"].get<std::string>();
-        return last_argus_event;
-    }
-    bool updateEventStatus(const std::string& event_id, const std::string& status) override {
-        std::scoped_lock lock(mutex_);
-        if (event_id.empty()) return false;
-        updated_event_id = event_id;
-        updated_event_status = status;
-        if (event_id == active_event_id && status == "resolved") active_event_id.clear();
-        return true;
     }
     std::shared_ptr<DARTWIC::Modules::BaseModule> getModuleInstance(const std::string& name) override {
         const auto found = modules.find(name);
@@ -205,13 +190,9 @@ public:
         std::scoped_lock lock(mutex_);
         return storages.at(channel);
     }
-    int eventCount() {
+    int errorCount() {
         std::scoped_lock lock(mutex_);
-        return argus_event_count;
-    }
-    nlohmann::json lastEvent() {
-        std::scoped_lock lock(mutex_);
-        return last_argus_event;
+        return error_count;
     }
 
     std::mutex mutex_;
@@ -227,11 +208,7 @@ public:
     std::string last_error_title;
     std::string last_error_description;
     double last_error_separation_seconds{0.0};
-    int argus_event_count{0};
-    nlohmann::json last_argus_event = nlohmann::json::object();
-    std::string active_event_id;
-    std::string updated_event_id;
-    std::string updated_event_status;
+    int last_error_auto_acknowledge{-1};
 };
 
 class Simulator {
@@ -459,6 +436,31 @@ void testConnectionMonitor() {
 }
 
 void testDiscoveryLifecycle() {
+    for (const bool configured_targets : {false, true}) {
+        nlohmann::json disabled = {{"device_discovery", {{"enabled", false}}}};
+        if (configured_targets) {
+            disabled["device_discovery"]["network_scan"] = {{"enabled", true}};
+            disabled["device_discovery"]["targets"] = nlohmann::json::array({
+                {{"host", "127.0.0.1"}, {"port", 15099}}
+            });
+        }
+        MockApi disabled_api;
+        int disabled_scans = 0;
+        ModbusDeviceFinder disabled_finder(&disabled_api, disabled, [&](const nlohmann::json&) {
+            ++disabled_scans;
+            return nlohmann::json::object();
+        });
+        const auto settings = disabled_finder.settings();
+        require(!settings.at("enabled").get<bool>() &&
+            !settings.at("network_scan").at("enabled").get<bool>(),
+            "Disabled discovery retained enabled targets or network scanning");
+        disabled_finder.tick();
+        disabled_finder.tick();
+        require(disabled_scans == 0 && disabled_api.discovery_requests == 0 &&
+            disabled_api.presence_updates == 0 &&
+            disabled_finder.settings().at("network_scan").at("queued_endpoints") == 0,
+            "Disabled discovery scanned or announced a device");
+    }
     MockApi api;
     int scans = 0;
     bool mute_during_scan = false;
@@ -668,40 +670,40 @@ int main(int argc, char** argv) {
         require(numeric(api.value("disconnect.info.connected")) == 1.0,
             "Initial successful transaction did not publish connected health");
         require(disconnect_simulator.waitForDrop(), "Disconnect-test server did not close its client socket");
-        const int events_before_disconnect = api.argus_event_count;
+        const int errors_before_disconnect = api.errorCount();
         require(!disconnect_client.readInputRegisters(0, disconnect_values),
             "Transaction unexpectedly succeeded after the server closed its socket");
         disconnect_client.publishConnectionState();
         require(!disconnect_client.isConnected() && numeric(api.value("disconnect.info.connected")) == 0.0,
             "Server disconnect did not immediately clear client and RAPID connection state");
-        require(api.argus_event_count > events_before_disconnect &&
-            api.last_argus_event.value("title", std::string{}).find("MODBUS CONNECTION ERROR") != std::string::npos,
-            "Server disconnect was not classified as a dedicated ARGUS connection event");
-        require(api.last_argus_event.value("description", std::string{}).find("No error") == std::string::npos,
+        require(api.errorCount() > errors_before_disconnect &&
+            api.last_error_title.find("MODBUS CONNECTION ERROR") != std::string::npos &&
+            api.last_error_separation_seconds == 10.0,
+            "Server disconnect was not reported through the host console-error API");
+        require(api.last_error_description.find("No error") == std::string::npos,
             "Server disconnect produced the misleading no-error message");
         require(!disconnect_simulator.failed(), "Disconnect simulator failed");
 
         const int idle_port = port + 3000;
-        const int events_before_idle_monitor = api.eventCount();
+        const int errors_before_idle_monitor = api.errorCount();
         auto idle_module = std::shared_ptr<DARTWIC::Modules::BaseModule>(plugin.createModule("tcp_client", {
             {"name", "idle"},
             {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", idle_port},
-                {"unit_id", 1}, {"tv_sec", 0}, {"tv_usec", 50000},
-                {"event_system", "GROUND"}, {"event_subsystem", "PLC"}}}
+                {"unit_id", 1}, {"tv_sec", 0}, {"tv_usec", 50000}}}
         }, &api));
         api.modules["idle"] = idle_module;
-        for (int attempt = 0; attempt < 20 && api.eventCount() == events_before_idle_monitor; ++attempt) {
+        api.module_summaries.push_back({"idle", "modbus_tcp_client", "tcp_client", ""});
+        for (int attempt = 0; attempt < 20 && api.errorCount() == errors_before_idle_monitor; ++attempt) {
+            api.loops.at("connection_monitor").on_loop();
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        const auto idle_event = api.lastEvent();
         require(numeric(api.value("idle.info.connected")) == 0.0,
             "Idle disconnected module did not retain disconnected channel state");
-        require(api.eventCount() > events_before_idle_monitor,
-            "Connection monitor did not trigger an event while Modbus tasks were stopped");
-        require(idle_event.value("system", std::string{}) == "GROUND" &&
-            idle_event.value("subsystem", std::string{}) == "PLC",
-            "Connection event did not use the configured ARGUS system and subsystem");
-        require(idle_event.value("auto_acknowledge_seconds", -1) == 0,
+        require(api.errorCount() > errors_before_idle_monitor &&
+            api.last_error_title.find("MODBUS CONNECTION ERROR [idle]") != std::string::npos &&
+            api.last_error_separation_seconds == 10.0,
+            "Shared connection monitor did not report an error while Modbus tasks were stopped");
+        require(api.last_error_auto_acknowledge == 0,
             "Connection event unexpectedly auto-acknowledges while the fault is firing");
 
         MockRuntime duplicate("duplicate_read", "modbus_tcp_client.read", read_runtime.getArguments());

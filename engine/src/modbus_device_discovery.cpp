@@ -282,7 +282,10 @@ ModbusDeviceFinder::ModbusDeviceFinder(DARTWIC::API::SDK_API* api, const nlohman
             std::chrono::system_clock::now().time_since_epoch()).count();
     }) {
     const auto discovery = plugin_config.value("device_discovery", nlohmann::json::object());
-    if (!discovery.value("enabled", true)) return;
+    if (!discovery.value("enabled", true)) {
+        network_scan_.enabled = false;
+        return;
+    }
     const auto network_scan = discovery.value("network_scan", nlohmann::json::object());
     network_scan_.enabled = network_scan.value("enabled", network_scan_.enabled);
     network_scan_.include_local_subnets = network_scan.value(
