@@ -79,6 +79,8 @@ set_target_properties(modbus_tcp_client_engine PROPERTIES
         PDB_OUTPUT_DIRECTORY_RELEASE "${ENGINE_PLUGIN_DIR}/bin")
 
 set(ENGINE_PLUGIN_COPY_COMMANDS
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${ENGINE_PLUGIN_DIR}/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${ENGINE_PLUGIN_DIR}/assets"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${ENGINE_PLUGIN_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PLUGIN_MANIFEST_FILE}"
