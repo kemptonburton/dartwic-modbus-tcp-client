@@ -1,14 +1,20 @@
 {
+  "version": "1.0.1",
+  "platforms": [
+    "win32-x64"
+  ],
+  "engineVariants": [
+    "engine",
+    "engine-debug"
+  ],
   "files": {
     "plugin.json": {
-      "sha256": "9c420e3fed7f0c22a4bee8eed443bedbad68717c8489257248519991adc0aa74",
+      "sha256": "faa0f1711df7e1a4e7bc8ce0562287c89d7a04fa7c846b02cc7156901b2a5116",
       "bytes": 956
     },
-    "plugin.zip": {
-      "sha256": "6357b7323a24458cd3bea3bd14fe1e26f910cdcda61dec2cafd7a46bb2cc63f0",
-      "bytes": 3127721
+    "plugin-win32-x64.zip": {
+      "sha256": "d4aaf69b18e5821c8caa0313463bd454ffee4ff06381bf2788aa9733d76b1901",
+      "bytes": 3194088
     }
-  },
-  "platform": "windows-x64",
-  "version": "2.0.0"
+  }
 }
