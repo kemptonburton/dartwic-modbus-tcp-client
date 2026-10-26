@@ -45,22 +45,10 @@ struct RuntimeContext {
     std::vector<MappingBlock> read_blocks;
     std::vector<MappingBlock> write_blocks;
     std::vector<uint8_t> completed_blocks;
-    double readback_interval_seconds{0.0};
-    std::chrono::steady_clock::time_point next_readback{};
     std::string task_name;
     bool read_task{false};
     std::array<DARTWIC::API::FixedChannelHandle, 4> diagnostic_handles;
 };
-
-struct TaskOwnership {
-    std::string instance;
-    bool read_task{false};
-};
-
-std::mutex ownership_mutex;
-std::unordered_map<std::string, std::string> module_read_task_owners;
-std::unordered_map<std::string, std::string> module_write_task_owners;
-std::unordered_map<std::string, TaskOwnership> task_module_ownership;
 
 int validateUnitId(int unit_id) {
     if (unit_id < 0 || (unit_id > 247 && unit_id != 0xFF)) {
@@ -104,7 +92,9 @@ std::vector<Mapping> parseMappings(const nlohmann::json& arguments,
         Mapping mapping;
         mapping.address = item["register"].get<int>();
         mapping.channel = normalizedChannel(item["channel"].get<std::string>());
-        mapping.readback_channel = normalizedChannel(item.value("readback_channel", std::string{}));
+        mapping.readback_channel = is_write
+            ? normalizedChannel(item.value("readback_channel", mapping.channel + "_state"))
+            : std::string{};
         const auto parsed_type = parseType(item, fallback);
         if (!parsed_type) {
             throw std::runtime_error(std::string(key) + "[" + std::to_string(mapping_index) +
@@ -121,6 +111,11 @@ std::vector<Mapping> parseMappings(const nlohmann::json& arguments,
         }
         result.push_back(std::move(mapping));
         ++mapping_index;
+    }
+    for (const auto& mapping : result) {
+        if (!mapping.readback_channel.empty() && std::any_of(result.begin(), result.end(), [&](const Mapping& command) {
+            return command.channel == mapping.readback_channel;
+        })) throw std::runtime_error("Modbus command and readback channels must be separate.");
     }
     std::sort(result.begin(), result.end(), [](const Mapping& left, const Mapping& right) {
         if (left.type != right.type) return static_cast<int>(left.type) < static_cast<int>(right.type);
@@ -167,16 +162,8 @@ void createFixedChannel(DARTWIC::API::SDK_API* api, const std::string& channel, 
     (void)api->createFixedChannel(channel, initial_value);
 }
 
-void configureTask(DARTWIC::API::SDK_API* api, DARTWIC::API::TaskRuntime& runtime, bool read_task) {
+void configureTask(const std::shared_ptr<ModbusTCPClientModule>& module, DARTWIC::API::TaskRuntime& runtime, bool read_task) {
     const auto& arguments = runtime.getArguments();
-    const std::string instance = arguments.value("module_instance_name", std::string{});
-    if (instance.empty()) throw std::runtime_error(
-        read_task ? "modbus_tcp_client.read requires module_instance_name." :
-            "modbus_tcp_client.write requires module_instance_name.");
-    auto module = std::dynamic_pointer_cast<ModbusTCPClientModule>(api->getModuleInstance(instance));
-    if (!module || module->dartwic == nullptr) {
-        throw std::runtime_error("Configured Modbus module instance `" + instance + "` is not available.");
-    }
     auto* module_api = module->dartwic;
 
     const auto reads = read_task
@@ -190,18 +177,6 @@ void configureTask(DARTWIC::API::SDK_API* api, DARTWIC::API::TaskRuntime& runtim
             ? "Configure at least one Modbus read mapping before starting this task."
             : "Configure at least one Modbus write mapping before starting this task.");
     }
-    // Check ownership before channel creation, then verify once more when committing
-    // the task-to-module association so a failed reconfiguration keeps its old owner.
-    {
-        std::scoped_lock lock(ownership_mutex);
-        auto& owners = read_task ? module_read_task_owners : module_write_task_owners;
-        const auto owner = owners.find(instance);
-        if (owner != owners.end() && owner->second != runtime.getTaskName()) {
-            throw std::runtime_error("Modbus module `" + instance + "` already has a " +
-                (read_task ? "read" : "write") + " task: `" + owner->second + "`.");
-        }
-    }
-
     // Use the module-scoped API so RAPID records the producing module as well as
     // the plugin. The plugin-scoped API identifies `plugin:modbus_tcp_client`.
     for (const auto& mapping : reads) createFixedChannel(module_api, mapping.channel);
@@ -218,35 +193,14 @@ void configureTask(DARTWIC::API::SDK_API* api, DARTWIC::API::TaskRuntime& runtim
     createFixedChannel(module_api, diagnosticChannel(runtime.getTaskName(), "failure_count"));
     createFixedChannel(module_api, diagnosticChannel(runtime.getTaskName(), "reconnect_count"));
 
-    {
-        std::scoped_lock lock(ownership_mutex);
-        auto& owners = read_task ? module_read_task_owners : module_write_task_owners;
-        const auto owner = owners.find(instance);
-        if (owner != owners.end() && owner->second != runtime.getTaskName()) {
-            throw std::runtime_error("Modbus module `" + instance + "` was claimed by task `" + owner->second + "` during configuration.");
-        }
-        const auto previous = task_module_ownership.find(runtime.getTaskName());
-        if (previous != task_module_ownership.end() &&
-            (previous->second.instance != instance || previous->second.read_task != read_task)) {
-            auto& previous_owners = previous->second.read_task ? module_read_task_owners : module_write_task_owners;
-            const auto previous_owner = previous_owners.find(previous->second.instance);
-            if (previous_owner != previous_owners.end() && previous_owner->second == runtime.getTaskName()) {
-                previous_owners.erase(previous_owner);
-            }
-        }
-        owners[instance] = runtime.getTaskName();
-        task_module_ownership[runtime.getTaskName()] = {instance, read_task};
-    }
+
 }
 
-std::shared_ptr<RuntimeContext> createRuntime(DARTWIC::API::SDK_API* api,
+std::shared_ptr<RuntimeContext> createRuntime(const std::shared_ptr<ModbusTCPClientModule>& module,
     DARTWIC::API::TaskRuntime& runtime, bool read_task) {
     const auto& arguments = runtime.getArguments();
-    const std::string instance = arguments.value("module_instance_name", std::string{});
-    auto module = std::dynamic_pointer_cast<ModbusTCPClientModule>(api->getModuleInstance(instance));
-    if (!module) throw std::runtime_error("Configured Modbus module instance `" + instance + "` is not available.");
     auto context = std::make_shared<RuntimeContext>();
-    context->module = std::move(module);
+    context->module = module;
     if (read_task) context->read_blocks = buildBlocks(parseMappings(arguments, "read_mappings", RegisterType::InputRegister));
     else context->write_blocks = buildBlocks(parseMappings(arguments, "write_mappings", RegisterType::Coil, true));
     if (read_task ? context->read_blocks.empty() : context->write_blocks.empty()) {
@@ -255,8 +209,6 @@ std::shared_ptr<RuntimeContext> createRuntime(DARTWIC::API::SDK_API* api,
             : "Configure at least one Modbus write mapping before starting this task.");
     }
     context->completed_blocks.resize(read_task ? context->read_blocks.size() : context->write_blocks.size());
-    context->readback_interval_seconds = arguments.value("readback_interval_seconds", 0.0);
-    context->next_readback = std::chrono::steady_clock::now();
     context->task_name = runtime.getTaskName();
     context->read_task = read_task;
     for (auto& block : read_task ? context->read_blocks : context->write_blocks) {
@@ -274,6 +226,19 @@ std::shared_ptr<RuntimeContext> createRuntime(DARTWIC::API::SDK_API* api,
             diagnosticChannel(context->task_name, suffixes[index]));
     }
     return context;
+}
+
+void claimTaskOutputs(const RuntimeContext& context) {
+    auto* api = context.module->dartwic;
+    for (const auto& block : context.read_task ? context.read_blocks : context.write_blocks) {
+        for (const auto& mapping : block.mappings) {
+            const auto& channel = context.read_task ? mapping.channel : mapping.readback_channel;
+            if (!channel.empty()) api->setChannel(channel);
+        }
+    }
+    for (const auto* suffix : {"transaction_time_ms", "stale", "failure_count", "reconnect_count"}) {
+        api->setChannel(diagnosticChannel(context.task_name, suffix));
+    }
 }
 
 bool readBlock(ModbusTCPClient& client, MappingBlock& block) {
@@ -309,15 +274,6 @@ void publishDiagnostics(DARTWIC::API::SDK_API* api, const RuntimeContext& contex
     (void)api->upsertChannel(context.diagnostic_handles[3], static_cast<double>(reconnect_count));
 }
 
-void cleanupTaskOwnership(DARTWIC::API::TaskRuntime& runtime) {
-    std::scoped_lock lock(ownership_mutex);
-    const auto task_owner = task_module_ownership.find(runtime.getTaskName());
-    if (task_owner == task_module_ownership.end()) return;
-    auto& owners = task_owner->second.read_task ? module_read_task_owners : module_write_task_owners;
-    const auto owner = owners.find(task_owner->second.instance);
-    if (owner != owners.end() && owner->second == runtime.getTaskName()) owners.erase(owner);
-    task_module_ownership.erase(task_owner);
-}
 } // namespace
 
 ModbusTCPClientModule::ModbusTCPClientModule(nlohmann::json cfg, DARTWIC::API::SDK_API* api)
@@ -386,9 +342,15 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
         {"module_instance_name", ""},
         {"read_mappings", nlohmann::json::array()},
     };
-    read_task.on_configure = [this](const auto&, DARTWIC::API::TaskRuntime& runtime) {
-        configureTask(dartwic, runtime, true);
-        runtime.setTypedRuntimeContext("modbus_tcp_client.read", createRuntime(dartwic, runtime, true));
+    task_bindings_.bind<ModbusTCPClientModule>(read_task, dartwic, "modbus_tcp_client", "tcp_client", 1,
+        [](const auto& module, DARTWIC::API::TaskRuntime& runtime) {
+            configureTask(module, runtime, true);
+            runtime.setTypedRuntimeContext("modbus_tcp_client.read", createRuntime(module, runtime, true));
+        });
+    read_task.on_start = [](const auto&, DARTWIC::API::TaskRuntime& runtime) {
+        if (const auto context = runtime.getTypedRuntimeContext<RuntimeContext>("modbus_tcp_client.read")) {
+            claimTaskOutputs(*context);
+        }
     };
     read_task.on_task = [](const auto&, DARTWIC::API::TaskRuntime& runtime, double) {
         const auto context = runtime.getTypedRuntimeContext<RuntimeContext>("modbus_tcp_client.read");
@@ -418,7 +380,6 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
         }
         publishDiagnostics(module_api, *context, succeeded, started, failure_count, reconnect_count);
     };
-    read_task.cleanup = cleanupTaskOwnership;
     dartwic->registerTaskType("read", "Modbus Read", std::move(read_task));
 
     DARTWIC::API::TaskTypeDefinition write_task;
@@ -426,16 +387,16 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
     write_task.metadata.icon_url = "https://upload.wikimedia.org/wikipedia/commons/d/da/Logo_of_Modbus.svg";
     write_task.metadata.default_arguments = {
         {"module_instance_name", ""},
-        {"write_mappings", nlohmann::json::array()},
-        {"readback_interval_seconds", 0.0}
+        {"write_mappings", nlohmann::json::array()}
     };
-    write_task.on_configure = [this](const auto&, DARTWIC::API::TaskRuntime& runtime) {
-        configureTask(dartwic, runtime, false);
-        runtime.setTypedRuntimeContext("modbus_tcp_client.write", createRuntime(dartwic, runtime, false));
-    };
+    task_bindings_.bind<ModbusTCPClientModule>(write_task, dartwic, "modbus_tcp_client", "tcp_client", 1,
+        [](const auto& module, DARTWIC::API::TaskRuntime& runtime) {
+            configureTask(module, runtime, false);
+            runtime.setTypedRuntimeContext("modbus_tcp_client.write", createRuntime(module, runtime, false));
+        });
     write_task.on_start = [](const auto&, DARTWIC::API::TaskRuntime& runtime) {
         if (const auto context = runtime.getTypedRuntimeContext<RuntimeContext>("modbus_tcp_client.write")) {
-            context->next_readback = std::chrono::steady_clock::now();
+            claimTaskOutputs(*context);
         }
     };
     write_task.on_task = [](const auto&, DARTWIC::API::TaskRuntime& runtime, double) {
@@ -465,15 +426,16 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
                         : client.writeHoldingRegisters(block.start_address, block.registers);
                     if (!wrote) succeeded = false;
                 }
-                const auto now = std::chrono::steady_clock::now();
-                if (context->readback_interval_seconds > 0.0 && now >= context->next_readback) {
-                    context->next_readback = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                        std::chrono::duration<double>(context->readback_interval_seconds));
-                    for (size_t index = 0; index < context->write_blocks.size(); ++index) {
-                        const bool complete = readBlock(client, context->write_blocks[index]);
-                        context->completed_blocks[index] = complete ? uint8_t{1} : uint8_t{0};
-                        if (!complete) succeeded = false;
-                    }
+                // Read the device after this cycle's writes. Never publish the
+                // command buffer as feedback when a read fails.
+                for (size_t index = 0; index < context->write_blocks.size(); ++index) {
+                    auto& block = context->write_blocks[index];
+                    if (std::none_of(block.mappings.begin(), block.mappings.end(), [](const Mapping& mapping) {
+                        return mapping.readback_handle.valid();
+                    })) continue;
+                    const bool complete = readBlock(client, block);
+                    context->completed_blocks[index] = complete ? uint8_t{1} : uint8_t{0};
+                    if (!complete) succeeded = false;
                 }
             }
             failure_count = client.failureCount();
@@ -484,7 +446,6 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
         }
         publishDiagnostics(module_api, *context, succeeded, started, failure_count, reconnect_count);
     };
-    write_task.cleanup = cleanupTaskOwnership;
     dartwic->registerTaskType("write", "Modbus Write", std::move(write_task));
 }
 

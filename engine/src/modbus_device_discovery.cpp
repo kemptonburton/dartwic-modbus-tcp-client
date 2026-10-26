@@ -212,12 +212,14 @@ std::string safeName(std::string value) {
 
 void appendChannels(nlohmann::json& channels, nlohmann::json& mappings,
     const nlohmann::json& table, const std::string& register_type, const std::string& channel_segment,
-    const std::string& direction, const std::string& instance_name) {
+    const std::string& direction, const std::string& instance_name, const std::string& readback_suffix) {
     if (!table.value("supported", false)) return;
     for (const auto& range : table.value("ranges", nlohmann::json::array())) {
         const int start = range.value("start", 0);
         const int end = range.value("end", -1);
         for (int address = start; address <= end && channels.size() < 4096; ++address) {
+            // A write suggestion reserves both command and observed-state channels.
+            if (!readback_suffix.empty() && channels.size() + 2 > 4096) return;
             const std::string channel = instance_name + "." + channel_segment + "." + std::to_string(address);
             channels.push_back({
                 {"name", channel},
@@ -230,6 +232,11 @@ void appendChannels(nlohmann::json& channels, nlohmann::json& mappings,
                 {"register_type", register_type},
                 {"channel", channel}
             });
+            if (!readback_suffix.empty()) {
+                const std::string readback = channel + readback_suffix;
+                mappings.back()["readback_channel"] = readback;
+                channels.push_back({{"name", readback}, {"direction", "input"}});
+            }
         }
     }
 }
@@ -254,6 +261,7 @@ nlohmann::json suggestionGroup(const nlohmann::json& table, const char* id, cons
             {"label", "Write"},
             {"channel_segment", std::string(channel_segment) + "_command"},
             {"direction", "output"},
+            {"readback_suffix", "_state"},
             {"default_enabled", use_as_default}
         });
     }
@@ -792,7 +800,8 @@ void ModbusDeviceFinder::announce(const Target& target, int unit_id, const nlohm
                 {"supported", true}, {"ranges", group.value("default_ranges", nlohmann::json::array())}
             }, group.value("register_type", std::string{}),
                 task_option.value("channel_segment", group.value("channel_segment", std::string{})),
-                task_option.value("direction", std::string{"input"}), instance_name);
+                task_option.value("direction", std::string{"input"}), instance_name,
+                task_option.value("readback_suffix", std::string{}));
         }
     }
 

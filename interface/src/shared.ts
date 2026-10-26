@@ -40,11 +40,6 @@ export function normalizeWriteMappings(argumentsPayload: any,
   return normalizeList(argumentsPayload, "write_mappings", "coil", convertChannelValuePathToChannelName);
 }
 
-export function normalizeReadbackInterval(argumentsPayload: any) {
-  const value = Number(argumentsPayload?.readback_interval_seconds);
-  return Number.isFinite(value) ? String(value) : "0";
-}
-
 function cleanMappings(mappings: MappingRowValue[]) {
   return mappings.map((mapping) => ({
     register_type: mapping.registerType,
@@ -53,14 +48,12 @@ function cleanMappings(mappings: MappingRowValue[]) {
   })).filter((mapping) => Number.isFinite(mapping.register) && mapping.register >= 0 && mapping.channel !== "");
 }
 
-export function buildReadWritePayload(selectedInstance: string, readbackInterval: string,
+export function buildReadWritePayload(selectedInstance: string,
   readMappings: MappingRowValue[], writeMappings: MappingRowValue[]) {
-  const interval = Number(readbackInterval);
   return {
     module_instance_name: selectedInstance,
     read_mappings: cleanMappings(readMappings),
     write_mappings: cleanMappings(writeMappings),
-    readback_interval_seconds: Number.isFinite(interval) && interval >= 0 ? interval : 0,
   };
 }
 

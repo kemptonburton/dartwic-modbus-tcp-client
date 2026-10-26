@@ -1,8 +1,6 @@
+import {moduleMap, readMap, writeMap, pluginMap} from "./configMaps";
 import { definePlugin } from "@dartwic/interface-sdk";
-import { moduleConfigs } from "./moduleConfigs";
 import { taskCards } from "./taskCards";
-import { taskConfigs } from "./taskConfigs";
-import {ModbusPluginSettings} from "./pluginSettings";
 
 export default definePlugin({
   id: "modbus_tcp_client",
@@ -11,19 +9,19 @@ export default definePlugin({
     registry.addTaskUi({
       id: "read",
       name: "Modbus Read",
+      configMap: readMap,
       card: taskCards[0].component,
-      editor: taskConfigs[0].component,
     });
     registry.addTaskUi({
       id: "write",
       name: "Modbus Write",
+      configMap: writeMap,
       card: taskCards[1].component,
-      editor: taskConfigs[1].component,
     });
     registry.addModuleUi({
       id: "tcp_client",
       name: "Modbus TCP Client",
-      panel: moduleConfigs[0].component,
+      configMap: moduleMap,
       connection: ({instanceConfig}) => ({
         channel: `${instanceConfig.name}.info.connected`,
         label: "Modbus TCP",
@@ -34,7 +32,7 @@ export default definePlugin({
     registry.addSettingsPanel({
       id: "discovery",
       name: "Discovery Settings",
-      component: ModbusPluginSettings,
+      configMap: pluginMap,
     });
   },
 });

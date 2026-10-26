@@ -97,6 +97,18 @@ after it is released. The task does not parse mappings or resolve channel names
 on each tick. Network timeout and reconnect behavior still bound the achievable
 period, so a configured task period is not a Modbus response guarantee.
 
+Each write cycle sends its commands and then reads the mapped coils or holding
+registers back from the device in that same callback. `readback_channel` defaults
+to `<command>_state`; an explicitly empty name disables that mapping's feedback.
+The former `readback_interval_seconds` argument is ignored. The task frequency
+controls both writes and readbacks. A failed read does not publish the command
+as feedback or refresh the last observed value, and marks the cycle stale.
+
+On each start, read tasks use `setChannel` for their measurements and write tasks
+use it for their readbacks; both also set their diagnostics observe-only. Cycles
+publish through retained fixed handles without reacquiring authority. Command
+inputs remain writable. Hold retains authority; completed stop releases it.
+
 Connection and transaction errors use ARGUS's explicit 10-second firing
 separation. Repeated accepted reports refresh one occurrence; the separation
 does not replace the Modbus reconnect delay or the request timeout.

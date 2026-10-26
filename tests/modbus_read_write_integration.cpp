@@ -54,6 +54,7 @@ public:
     const std::string& getTaskType() const override { return type_; }
     const nlohmann::json& getMetadata() const override { return metadata_; }
     const nlohmann::json& getArguments() const override { return arguments_; }
+    void setArguments(nlohmann::json arguments) { arguments_ = std::move(arguments); }
     double getElapsedSeconds() const override { return 0.0; }
     bool isStopRequested() const override { return false; }
     void setFixedInputChannels(std::vector<std::string> channels) override {
@@ -177,6 +178,7 @@ public:
     }
     void setChannel(const std::string& channel, std::optional<ChannelValue> value) override {
         ++set_channel_count;
+        observed_channels.push_back(channel);
         if (value) upsertChannelField(channel, ChannelField::VALUE, std::move(*value), ChannelStorage::Fixed);
     }
     void claimChannel(const std::string&) override {}
@@ -205,6 +207,7 @@ public:
     std::vector<ModuleInstanceSummary> module_summaries;
     int error_count{0};
     int set_channel_count{0};
+    std::vector<std::string> observed_channels;
     std::string last_error_title;
     std::string last_error_description;
     double last_error_separation_seconds{0.0};
@@ -225,13 +228,25 @@ public:
                 return;
             }
             uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]{};
-            for (int request = 0; request < 2; ++request) {
+            for (int request = 0; request < 17; ++request) {
                 if (!waitForConnection(modbus_get_socket(context_))) {
                     failed_.store(true);
                     return;
                 }
                 const int length = modbus_receive(context_, query);
-                if (length <= 0 || modbus_reply(context_, query, length, mapping_) < 0) {
+                if (length <= 0) {
+                    failed_.store(true);
+                    return;
+                }
+                // The device can report a state different from the command.
+                // On the last cycle its coil read fails after writes succeed.
+                const auto function = query[modbus_get_header_length(context_)];
+                if (request >= 9 && function == 1) mapping_->tab_bits[0] = 0;
+                if (request >= 9 && function == 3) mapping_->tab_registers[20] = 777;
+                const int replied = request >= 13 && function == 1
+                    ? modbus_reply_exception(context_, query, MODBUS_EXCEPTION_SLAVE_OR_SERVER_FAILURE)
+                    : modbus_reply(context_, query, length, mapping_);
+                if (replied < 0) {
                     failed_.store(true);
                     return;
                 }
@@ -269,7 +284,7 @@ public:
             }
             uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]{};
             for (int connection = 0; connection < 3; ++connection) {
-                if (modbus_tcp_accept(context_, &server_socket) < 0) {
+                if (!waitForConnection(server_socket) || modbus_tcp_accept(context_, &server_socket) < 0) {
                     failed_.store(true);
                     return;
                 }
@@ -312,9 +327,10 @@ public:
         mapping_ = modbus_mapping_new(8, 8, 8, 8);
         if (!context_ || !mapping_) throw std::runtime_error("Unable to create disconnect simulator");
         mapping_->tab_input_registers[0] = 909;
-        worker_ = std::thread([this]() {
-            int server_socket = modbus_tcp_listen(context_, 1);
-            if (server_socket < 0 || modbus_tcp_accept(context_, &server_socket) < 0) {
+        const int listening_socket = modbus_tcp_listen(context_, 1);
+        if (listening_socket < 0) throw std::runtime_error("Unable to listen for disconnect test");
+        worker_ = std::thread([this, server_socket = listening_socket]() mutable {
+            if (!waitForConnection(server_socket) || modbus_tcp_accept(context_, &server_socket) < 0) {
                 failed_.store(true);
                 return;
             }
@@ -337,7 +353,6 @@ public:
             modbus_close(context_);
             dropped_.store(true, std::memory_order_release);
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     ~AbruptDisconnectSimulator() {
         if (worker_.joinable()) worker_.join();
@@ -475,7 +490,11 @@ void testDiscoveryLifecycle() {
         ++scans;
         if (!online) throw std::runtime_error("Simulator is offline");
         if (mute_during_scan) api.discovery_muted = true;
-        return nlohmann::json{{"scanned", {{"start_address", 0}, {"end_address", 1}}}};
+        const nlohmann::json table = {{"supported", true}, {"available_count", 2},
+            {"ranges", nlohmann::json::array({{{"start", 0}, {"end", 1}}})}};
+        return nlohmann::json{{"scanned", {{"start_address", 0}, {"end_address", 1}}},
+            {"coils", table}, {"discrete_inputs", table},
+            {"holding_registers", table}, {"input_registers", table}};
     }, [&] { return now; });
     api.discovery_muted = true;
     finder.tick();
@@ -485,6 +504,29 @@ void testDiscoveryLifecycle() {
     finder.tick();
     require(scans == 1 && api.discovery_requests == 1, "Unmute must offer the device exactly once");
     const auto& provisioning = api.discovery_request.at("payload").at("provisioning");
+    for (const auto& group : provisioning.at("channel_suggestion_editor").at("groups")) {
+        for (const auto& option : group.at("task_options")) {
+            require(option.value("readback_suffix", std::string{}) ==
+                (option.at("task_id") == "write" ? "_state" : ""),
+                "Editable discovery write mappings must derive observed-state channels");
+        }
+    }
+    const auto& channels = api.discovery_request.at("payload").at("channels");
+    require(channels.size() == 12, "Discovery must include command and readback channels for both writable tables");
+    size_t write_count = 0;
+    for (const auto& task : provisioning.at("tasks")) {
+        if (task.at("task_type") != "write") continue;
+        for (const auto& mapping : task.at("arguments").at("write_mappings")) {
+            ++write_count;
+            const std::string readback = mapping.at("channel").get<std::string>() + "_state";
+            require(mapping.at("readback_channel") == readback,
+                "Default discovery write mappings must retain their readback channel");
+            require(std::any_of(channels.begin(), channels.end(), [&](const auto& channel) {
+                return channel.at("name") == readback && channel.at("direction") == "input";
+            }), "Each suggested readback must have an input-channel declaration");
+        }
+    }
+    require(write_count == 4, "Discovery must suggest both coil and holding-register writes");
     const auto& resources = provisioning.at("resources");
     require(resources.at("channels").size() == 1 && resources.at("loops").empty() &&
         resources.at("channels").at(0).at("name") == "{instance}.info.connected",
@@ -583,6 +625,8 @@ int main(int argc, char** argv) {
             {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", port}, {"unit_id", 1},
                 {"tv_sec", 0}, {"tv_usec", 200000}, {"connection_monitor_enabled", false}}}
         }, &api));
+        module->setPluginId("modbus_tcp_client");
+        module->setModuleTypeId("tcp_client");
         api.modules["simulator"] = module;
 
         MockRuntime read_runtime("modbus_read", "modbus_tcp_client.read", {
@@ -594,7 +638,9 @@ int main(int argc, char** argv) {
         MockRuntime write_runtime("modbus_write", "modbus_tcp_client.write", {
             {"module_instance_name", "simulator"},
             {"write_mappings", nlohmann::json::array({
-                {{"register", 20}, {"channel", "command.valve"}, {"register_type", "holding_register"}}
+                {{"register", 20}, {"channel", "command.valve"}, {"register_type", "holding_register"}},
+                {{"register", 0}, {"channel", "command.coil"}, {"register_type", "coil"},
+                    {"readback_channel", "feedback.coil"}}
             })}
         });
         auto& read_type = api.task_types.at("read");
@@ -604,9 +650,11 @@ int main(int argc, char** argv) {
         require(api.storage("sensor.pressure") == ChannelStorage::Fixed &&
             api.storage("command.valve") == ChannelStorage::Fixed,
             "Mapped Modbus channels were not configured Fixed");
-        require(write_runtime.fixed_input_channels_ == std::vector<std::string>{"command.valve"},
+        require(write_runtime.fixed_input_channels_ == std::vector<std::string>{"command.coil", "command.valve"},
             "Modbus configuration did not declare its fixed command snapshot");
+        require(api.observed_channels.empty(), "Configuration must not acquire task authority");
         api.upsertChannelField("command.valve", ChannelField::VALUE, 55.0, ChannelStorage::Fixed);
+        api.upsertChannelField("command.coil", ChannelField::VALUE, 1.0, ChannelStorage::Fixed);
         if (read_type.on_start) read_type.on_start(read_type, read_runtime);
         read_type.on_task(read_type, read_runtime, 0.01);
         write_type.on_start(write_type, write_runtime);
@@ -617,8 +665,38 @@ int main(int argc, char** argv) {
         }
         if (simulator.failed()) throw std::runtime_error("Modbus simulator transaction failed");
         require(simulator.holding(20) == 55, "Command snapshot was not written");
+        require(numeric(api.value("command.valve_state")) == 55.0 &&
+            numeric(api.value("feedback.coil")) == 1.0,
+            "Write cycle must read actual holding-register and coil states without an interval setting");
+        const auto observed = [&](const std::string& channel) {
+            return std::find(api.observed_channels.begin(), api.observed_channels.end(), channel) != api.observed_channels.end();
+        };
+        require(observed("sensor.pressure") && observed("command.valve_state") && observed("feedback.coil") &&
+            observed("modbus_write.modbus.stale") && !observed("command.valve") && !observed("command.coil"),
+            "Starts must set measurements/readbacks/diagnostics only, never command inputs");
+        for (int cycle = 1; cycle <= 3; ++cycle) {
+            auto arguments = write_runtime.getArguments();
+            arguments["readback_interval_seconds"] = cycle == 1 ? 0 : 3600;
+            write_runtime.setArguments(arguments);
+            write_type.on_configure(write_type, write_runtime);
+            api.observed_channels.clear();
+            write_type.on_start(write_type, write_runtime);
+            require(observed("feedback.coil") && !observed("command.coil"),
+                "Restart must reacquire only readback authority");
+            api.upsertChannelField("command.valve", ChannelField::VALUE, 55.0 + cycle, ChannelStorage::Fixed);
+            api.upsertChannelField("command.coil", ChannelField::VALUE, cycle == 1 ? 0.0 : 1.0, ChannelStorage::Fixed);
+            write_type.on_task(write_type, write_runtime, 0.01);
+            require(numeric(api.value("feedback.coil")) == 0.0,
+                "Readback must follow device state and retain its last observation on read failure");
+            require(numeric(api.value("command.valve_state")) == (cycle == 1 ? 56.0 : 777.0),
+                "Legacy interval values must not gate same-cycle device readback");
+            require(numeric(api.value("modbus_write.modbus.stale")) == (cycle == 3 ? 1.0 : 0.0),
+                "Readback failure must mark the write cycle stale");
+        }
+        require(!simulator.failed(), "Same-cycle readback simulator failed");
         require(numeric(api.value("sensor.pressure")) == 321.0, "Sensor input was not published");
         require(numeric(api.value("modbus_read.modbus.stale")) == 0.0, "Successful read remained stale");
+        std::cout << "Same-cycle coil/register readback and start authority passed." << std::endl;
 
         const int timeout_recovery_port = port + 1000;
         TimeoutRecoverySimulator timeout_recovery_simulator(timeout_recovery_port);
@@ -711,8 +789,51 @@ int main(int argc, char** argv) {
         try { read_type.on_configure(read_type, duplicate); }
         catch (const std::exception&) { duplicate_rejected = true; }
         require(duplicate_rejected, "A second read task was allowed on one Modbus connection");
+
+        // Failed preparation cannot leak a destination claim or release the old one.
+        api.modules["alternate"] = module;
+        auto invalid_arguments = read_runtime.getArguments();
+        invalid_arguments["module_instance_name"] = "alternate";
+        invalid_arguments["read_mappings"] = nlohmann::json::array();
+        MockRuntime failed_reassignment("modbus_read", "modbus_tcp_client.read", invalid_arguments);
+        bool reassignment_rejected = false;
+        try { read_type.on_configure(read_type, failed_reassignment); }
+        catch (const std::exception&) { reassignment_rejected = true; }
+        require(reassignment_rejected, "Invalid reassignment was accepted");
+        duplicate_rejected = false;
+        try { read_type.on_configure(read_type, duplicate); }
+        catch (const std::exception&) { duplicate_rejected = true; }
+        require(duplicate_rejected, "Failed reassignment released the old module slot");
+        auto alternate_arguments = read_runtime.getArguments();
+        alternate_arguments["module_instance_name"] = "alternate";
+        MockRuntime alternate("alternate_read", "modbus_tcp_client.read", alternate_arguments);
+        read_type.on_configure(read_type, alternate);
+        read_type.cleanup(alternate);
+
+        MockRuntime reassigned("modbus_read", "modbus_tcp_client.read", alternate_arguments);
+        read_type.on_configure(read_type, reassigned);
+        read_type.on_configure(read_type, duplicate);
+        read_type.cleanup(duplicate);
         read_type.cleanup(read_runtime);
         write_type.cleanup(write_runtime);
+
+        std::vector<std::unique_ptr<MockRuntime>> contenders;
+        std::vector<std::thread> configuring;
+        std::atomic<int> winners{0};
+        std::atomic<int> winner_index{-1};
+        for (int index = 0; index < 8; ++index)
+            contenders.push_back(std::make_unique<MockRuntime>("concurrent_read_" + std::to_string(index),
+                "modbus_tcp_client.read", read_runtime.getArguments()));
+        for (int index = 0; index < 8; ++index) configuring.emplace_back([&, index] {
+            try {
+                read_type.on_configure(read_type, *contenders[index]);
+                ++winners;
+                winner_index.store(index);
+            } catch (const std::exception&) {}
+        });
+        for (auto& thread : configuring) thread.join();
+        require(winners.load() == 1, "Concurrent module claims did not admit exactly one read task");
+        read_type.cleanup(*contenders[winner_index.load()]);
         std::cout << "Modbus split read/write simulator integration passed.\n";
         return 0;
     } catch (const std::exception& error) {
