@@ -181,8 +181,18 @@ public:
         observed_channels.push_back(channel);
         if (value) upsertChannelField(channel, ChannelField::VALUE, std::move(*value), ChannelStorage::Fixed);
     }
-    void claimChannel(const std::string&) override {}
     void freeChannel(const std::string&) override {}
+    void applyAuthorityByName(uint32_t operation, const std::string& channel,
+        std::optional<ChannelValue> value) override {
+        if (operation == 1) { setChannel(channel, std::move(value)); return; }
+        if (value) upsertChannelField(channel, ChannelField::VALUE, std::move(*value), ChannelStorage::Fixed);
+    }
+    void applyAuthorityByHandle(uint32_t operation, const FixedChannelHandle& channel,
+        std::optional<ChannelValue> value) override {
+        if (!channel.channel) throw std::runtime_error("Invalid fixed channel handle");
+        applyAuthorityByName(operation, *channel.channel, std::move(value));
+    }
+
 
     ChannelValue value(const std::string& channel) {
         std::scoped_lock lock(mutex_);
