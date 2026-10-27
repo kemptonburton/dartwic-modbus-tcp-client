@@ -1,3 +1,9 @@
+# Modbus TCP Client Plugin 1.1.0
+
+- Refresh Engine and Interface SDK snapshots and rebuild native and Interface outputs.
+- Require Engine 2.1.0 with plugin ABI 6; preserve the existing minimum Interface version.
+- Prepared locally for the DARTWIC 2.1 bundle; not published.
+
 # Modbus TCP Client 1.0.2
 
 - Refreshed and bundled Engine and Interface SDK snapshots; interface builds no longer need a private neighboring checkout.
