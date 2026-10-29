@@ -156,12 +156,12 @@ public:
         loops[local_id] = std::move(definition);
         return "modbus_tcp_client." + local_id;
     }
-    int consoleError(std::string title, std::string description, std::vector<std::string>, std::string, int auto_acknowledge,
-        double separation_seconds) override {
+    int error(const std::string& title, const std::string& description, nlohmann::json, const std::string&, int auto_acknowledge,
+        double firing_timeout_seconds, const std::string&, const std::string&) override {
         std::scoped_lock lock(mutex_);
         last_error_title = std::move(title);
         last_error_description = std::move(description);
-        last_error_separation_seconds = separation_seconds;
+        last_error_firing_timeout_seconds = firing_timeout_seconds;
         last_error_auto_acknowledge = auto_acknowledge;
         ++error_count;
         return error_count;
@@ -220,7 +220,7 @@ public:
     std::vector<std::string> observed_channels;
     std::string last_error_title;
     std::string last_error_description;
-    double last_error_separation_seconds{0.0};
+    double last_error_firing_timeout_seconds{0.0};
     int last_error_auto_acknowledge{-1};
 };
 
@@ -670,7 +670,7 @@ int main(int argc, char** argv) {
         write_type.on_start(write_type, write_runtime);
         write_type.on_task(write_type, write_runtime, 0.01);
         if (api.error_count > 0) {
-            require(api.last_error_separation_seconds == 10.0,
+            require(api.last_error_firing_timeout_seconds == 10.0,
                 "Modbus connection errors need explicit ARGUS firing separation");
         }
         if (simulator.failed()) throw std::runtime_error("Modbus simulator transaction failed");
@@ -766,7 +766,7 @@ int main(int argc, char** argv) {
             "Server disconnect did not immediately clear client and RAPID connection state");
         require(api.errorCount() > errors_before_disconnect &&
             api.last_error_title.find("MODBUS CONNECTION ERROR") != std::string::npos &&
-            api.last_error_separation_seconds == 10.0,
+            api.last_error_firing_timeout_seconds == 10.0,
             "Server disconnect was not reported through the host console-error API");
         require(api.last_error_description.find("No error") == std::string::npos,
             "Server disconnect produced the misleading no-error message");
@@ -789,7 +789,7 @@ int main(int argc, char** argv) {
             "Idle disconnected module did not retain disconnected channel state");
         require(api.errorCount() > errors_before_idle_monitor &&
             api.last_error_title.find("MODBUS CONNECTION ERROR [idle]") != std::string::npos &&
-            api.last_error_separation_seconds == 10.0,
+            api.last_error_firing_timeout_seconds == 10.0,
             "Shared connection monitor did not report an error while Modbus tasks were stopped");
         require(api.last_error_auto_acknowledge == 0,
             "Connection event unexpectedly auto-acknowledges while the fault is firing");

@@ -616,7 +616,7 @@ void ModbusDeviceFinder::tick() {
                 const auto now = std::chrono::steady_clock::now();
                 if (next_announcement_error_ == std::chrono::steady_clock::time_point{} ||
                     now >= next_announcement_error_) {
-                    api_->consoleError(
+                    api_->error(
                         "MODBUS DISCOVERY UI ERROR",
                         error.what(),
                         {},

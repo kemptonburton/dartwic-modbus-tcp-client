@@ -374,7 +374,7 @@ void ModbusTCPClient::publishConnectionError(const std::string& error_message) {
     if (last_connection_error_publication_.time_since_epoch().count() != 0 &&
         now - last_connection_error_publication_ < std::chrono::milliseconds(750)) return;
     last_connection_error_publication_ = now;
-    module_->dartwic->consoleError(
+    module_->dartwic->error(
         "MODBUS CONNECTION ERROR [" + instance_name_ + "]",
         last_connection_error_message_ + " [" + server_ip_ + ":" +
             std::to_string(server_port_) + ", unit " + std::to_string(unit_id_) + "]",
@@ -389,7 +389,7 @@ void ModbusTCPClient::publishOperationError(const std::string& operation_name, c
     if (last_operation_error_publication_.time_since_epoch().count() != 0 &&
         now - last_operation_error_publication_ < std::chrono::seconds(2)) return;
     last_operation_error_publication_ = now;
-    module_->dartwic->consoleError(
+    module_->dartwic->error(
         "MODBUS TRANSACTION ERROR [" + instance_name_ + "]",
         operation_name + ": " + error_message,
         {instance_name_ + ".info.connected"},
