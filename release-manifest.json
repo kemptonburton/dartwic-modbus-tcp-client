@@ -1,5 +1,5 @@
 {
-  "version": "1.0.2",
+  "version": "1.1.0",
   "platforms": [
     "win32-x64"
   ],
@@ -9,12 +9,12 @@
   ],
   "files": {
     "plugin.json": {
-      "sha256": "36a3cea5a0ac36889a2e39f1b4242ea18ce50c8eebe700557bac57baf1670596",
-      "bytes": 957
+      "sha256": "4f741f6f4cf13b0aa8ab5502f1f7b278b04268fdb0dc7a21e9bf2ca202660a5f",
+      "bytes": 1000
     },
     "plugin-win32-x64.zip": {
-      "sha256": "1dbb58f6b273ddeb27a0929f651eb62ae5dc2c7998da1fefa8cb926888f579b3",
-      "bytes": 3305247
+      "sha256": "0012d06afdc847d0f5695e60cc756d9ef0bee87be0621923b85b43562c9e6c61",
+      "bytes": 3305795
     }
   }
 }
