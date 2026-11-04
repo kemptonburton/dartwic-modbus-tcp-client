@@ -31,6 +31,9 @@ function mappings(read: boolean) {
   const columns: ConfigMapField[] = [
     {path: 'register_type', label: 'Type', type: 'select', required: true, options: read ? readRegisterTypes : writeRegisterTypes},
     number('register', 'Address', 0, 65535),
+    {path: 'data_type', label: 'Value format', type: 'select', defaultValue: 'uint16', options: [
+      {value: 'uint16', label: 'Unsigned 16-bit'}, {value: 'int16', label: 'Signed 16-bit'},
+    ], description: 'Registers: unsigned 0–65535 or signed −32768–32767. Coils and discrete inputs use unsigned.'},
     {path: 'channel', label: read ? 'Publish channel' : 'Command channel', type: 'channel', channelMode: read ? 'write' : 'read', required: true},
   ];
   if (!read) columns.push({path: 'readback_channel', label: 'Readback channel', type: 'channel', channelMode: 'write',
@@ -52,7 +55,15 @@ export function taskMap(read: boolean) {
     validate(value) {
       if (Array.isArray(value.arguments?.mappings)) return 'Legacy task arguments are unsupported; create a new read or write task.';
       const rows = value.arguments?.[read ? 'read_mappings' : 'write_mappings'];
-      return !rows?.length ? 'Configure at least one mapping.' : '';
+      if (!rows?.length) return 'Configure at least one mapping.';
+      for (const row of rows) {
+        if (row.data_type != null && !['uint16', 'int16'].includes(row.data_type))
+          return 'Value format must be unsigned or signed 16-bit.';
+        const registerType = row.register_type || (read ? 'input_register' : 'coil');
+        if (row.data_type === 'int16' && ['coil', 'coils', 'discrete_input', 'discrete_inputs'].includes(registerType))
+          return 'Signed values require an input or holding register. Use unsigned for coils and discrete inputs.';
+      }
+      return '';
     },
 
   });

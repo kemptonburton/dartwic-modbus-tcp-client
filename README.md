@@ -115,6 +115,39 @@ does not replace the Modbus reconnect delay or the request timeout.
 
 ## Compatibility
 
+### Signed register values
+
+Each input- or holding-register mapping has a **Value format** setting. Choose
+**Signed 16-bit** for device values from −32768 to 32767, including negative
+temperatures or setpoints. **Unsigned 16-bit** covers 0 to 65535 and remains the
+default for existing mappings and discovery suggestions. Coils and discrete
+inputs remain Boolean and use the unsigned setting.
+
+Version 1.1.1 restores signed input-register interpretation as an explicit
+mapping option and adds signed holding-register writes and readbacks. After
+updating, select Signed 16-bit on each affected read or write mapping and apply
+the task configuration. A write mapping's format also controls its readback.
+For example, a device register containing `65526` (`0xFFF6`) publishes `-10`
+with the signed format; a signed command of `-10` writes that same bit pattern.
+
+In task JSON, set `"data_type": "int16"` on the mapping:
+
+```json
+{"register": 10, "register_type": "input_register", "channel": "sensor.temperature", "data_type": "int16"}
+```
+
+Use `"uint16"`, or omit `data_type`, for unsigned values. Unsupported formats
+and signed coil/discrete-input mappings fail configuration. This setting
+interprets one 16-bit register; it does not combine registers into floats or
+32-bit integers or apply scaling. Register writes round to the nearest integer
+(halfway values away from zero) and clamp to the selected format's range;
+unsigned negative commands still clamp to zero. NaN commands become zero and
+infinities clamp to the selected limits. Transactions remain synchronous within
+the task cycle; a readback confirms the register value observed from the device,
+not physical equipment motion.
+
+### Host requirements
+
 - engine loading is gated by `minEngineVersion`
 - interface loading is gated by `minInterfaceVersion`
 - both generated plugin output folders copy the root `plugin.json`

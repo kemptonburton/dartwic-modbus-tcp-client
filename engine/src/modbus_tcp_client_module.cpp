@@ -22,12 +22,14 @@ using DARTWIC::API::ChannelField;
 using DARTWIC::API::ChannelStorage;
 
 enum class RegisterType { InputRegister, DiscreteInput, Coil, HoldingRegister };
+enum class DataType { UInt16, Int16 };
 
 struct Mapping {
     int address{0};
     std::string channel;
     std::string readback_channel;
     RegisterType type{RegisterType::InputRegister};
+    DataType data_type{DataType::UInt16};
     DARTWIC::API::FixedChannelHandle channel_handle;
     DARTWIC::API::FixedChannelHandle readback_handle;
 };
@@ -101,6 +103,17 @@ std::vector<Mapping> parseMappings(const nlohmann::json& arguments,
                 "] has an unsupported register_type.");
         }
         mapping.type = *parsed_type;
+        const auto data_type = item.value("data_type", std::string{"uint16"});
+        if (data_type == "int16") mapping.data_type = DataType::Int16;
+        else if (data_type != "uint16") {
+            throw std::runtime_error(std::string(key) + "[" + std::to_string(mapping_index) +
+                "] data_type must be uint16 or int16.");
+        }
+        if (mapping.data_type == DataType::Int16 &&
+            (mapping.type == RegisterType::Coil || mapping.type == RegisterType::DiscreteInput)) {
+            throw std::runtime_error(std::string(key) + "[" + std::to_string(mapping_index) +
+                "] signed data_type requires an input or holding register.");
+        }
         if (is_write && (mapping.type == RegisterType::InputRegister || mapping.type == RegisterType::DiscreteInput)) {
             throw std::runtime_error(std::string(key) + "[" + std::to_string(mapping_index) +
                 "] cannot write an input register.");
@@ -146,7 +159,12 @@ std::vector<MappingBlock> buildBlocks(const std::vector<Mapping>& mappings) {
     return blocks;
 }
 
-uint16_t toRegister(double value) {
+uint16_t toRegister(double value, DataType data_type) {
+    if (std::isnan(value)) return 0;
+    if (data_type == DataType::Int16) {
+        const auto rounded = std::llround(std::clamp(value, -32768.0, 32767.0));
+        return static_cast<uint16_t>(rounded);
+    }
     if (value <= 0.0) return 0;
     if (value >= static_cast<double>((std::numeric_limits<uint16_t>::max)())) {
         return (std::numeric_limits<uint16_t>::max)();
@@ -258,7 +276,9 @@ void publishBlock(DARTWIC::API::SDK_API* api, const MappingBlock& block, bool us
         if (!handle.valid()) continue;
         const double value = (block.type == RegisterType::Coil || block.type == RegisterType::DiscreteInput)
             ? static_cast<double>(block.coils[index])
-            : static_cast<double>(block.registers[index]);
+            : (mapping.data_type == DataType::Int16 && block.registers[index] >= 0x8000
+                ? static_cast<double>(block.registers[index]) - 65536.0
+                : static_cast<double>(block.registers[index]));
         (void)api->upsertChannel(handle, value);
     }
 }
@@ -408,7 +428,7 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
             for (size_t index = 0; index < block.mappings.size(); ++index) {
                 const double value = module_api->queryChannel(block.mappings[index].channel_handle, 0.0);
                 if (block.type == RegisterType::Coil) block.coils[index] = value != 0.0 ? 1 : 0;
-                else block.registers[index] = toRegister(value);
+                else block.registers[index] = toRegister(value, block.mappings[index].data_type);
             }
         }
         bool succeeded = false;

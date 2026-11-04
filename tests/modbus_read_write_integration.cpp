@@ -3,6 +3,7 @@
 #else
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #include "modbus_tcp_client_module.h"
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -389,6 +391,153 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+class RegisterFormatSimulator {
+public:
+    explicit RegisterFormatSimulator(int port) {
+        context_ = modbus_new_tcp("127.0.0.1", port);
+        mapping_ = modbus_mapping_new(1, 1, 64, 64);
+        if (!context_ || !mapping_) throw std::runtime_error("Unable to create register-format simulator");
+        const uint16_t values[] = {0, 0x7FFF, 0x8000, 0xFFF6, 0xFFFF};
+        for (int index = 0; index < 5; ++index) {
+            mapping_->tab_input_registers[index] = values[index];
+            mapping_->tab_input_registers[index + 5] = values[index];
+        }
+        worker_ = std::thread([this]() {
+            int server = modbus_tcp_listen(context_, 1);
+            if (server < 0 || !waitForConnection(server) || modbus_tcp_accept(context_, &server) < 0) {
+                failed_.store(true);
+                if (server >= 0) closeSocket(server);
+                return;
+            }
+            closeSocket(server);
+            uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]{};
+            while (!stop_.load()) {
+                if (!waitForConnection(modbus_get_socket(context_))) continue;
+                const int length = modbus_receive(context_, query);
+                if (length <= 0) break;
+                if (modbus_reply(context_, query, length, mapping_) < 0) {
+                    failed_.store(true);
+                    break;
+                }
+            }
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ~RegisterFormatSimulator() {
+        stop_.store(true);
+        if (worker_.joinable()) worker_.join();
+        modbus_mapping_free(mapping_);
+        modbus_close(context_);
+        modbus_free(context_);
+    }
+    bool failed() const { return failed_.load(); }
+private:
+    static void closeSocket(int socket) {
+#ifdef _WIN32
+        closesocket(socket);
+#else
+        close(socket);
+#endif
+    }
+    modbus_t* context_{};
+    modbus_mapping_t* mapping_{};
+    std::thread worker_;
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> failed_{false};
+};
+
+void testRegisterFormats() {
+    const int port = 27000 + static_cast<int>(
+        std::chrono::steady_clock::now().time_since_epoch().count() % 1000);
+    RegisterFormatSimulator simulator(port);
+    MockApi api;
+    ModbusTCPClientPlugin plugin(nlohmann::json::object(), &api);
+    plugin.onPluginLoaded();
+    auto module = std::shared_ptr<DARTWIC::Modules::BaseModule>(plugin.createModule("tcp_client", {
+        {"name", "formats"}, {"parameters", {{"server_ip", "127.0.0.1"}, {"server_port", port},
+            {"unit_id", 1}, {"tv_sec", 0}, {"tv_usec", 200000}, {"connection_monitor_enabled", false}}}
+    }, &api));
+    module->setPluginId("modbus_tcp_client");
+    module->setModuleTypeId("tcp_client");
+    api.modules["formats"] = module;
+    auto mappings = nlohmann::json::array();
+    for (int index = 0; index < 10; ++index) {
+        mappings.push_back({{"register", index}, {"register_type", "input_register"},
+            {"channel", "input." + std::to_string(index)}, {"data_type", index < 5 ? "int16" : "uint16"}});
+    }
+    // Read the same holding-register bits with the opposite interpretation to
+    // the write mapping, independently checking the actual wire encoding.
+    mappings.push_back({{"register", 20}, {"register_type", "holding_register"}, {"channel", "raw.signed"}});
+    mappings.push_back({{"register", 21}, {"register_type", "holding_register"},
+        {"channel", "signed.unsigned"}, {"data_type", "int16"}});
+    MockRuntime read("format_read", "modbus_tcp_client.read", {
+        {"module_instance_name", "formats"}, {"read_mappings", mappings}});
+    MockRuntime write("format_write", "modbus_tcp_client.write", {
+        {"module_instance_name", "formats"}, {"write_mappings", nlohmann::json::array({
+            {{"register", 20}, {"register_type", "holding_register"}, {"channel", "command.signed"}, {"data_type", "int16"}},
+            {{"register", 21}, {"register_type", "holding_register"}, {"channel", "command.unsigned"}}
+        })}});
+    auto& read_type = api.task_types.at("read");
+    auto& write_type = api.task_types.at("write");
+    read_type.on_configure(read_type, read);
+    write_type.on_configure(write_type, write);
+    read_type.on_start(read_type, read);
+    write_type.on_start(write_type, write);
+    read_type.on_task(read_type, read, 0.01);
+    const double expected[] = {0, 32767, -32768, -10, -1, 0, 32767, 32768, 65526, 65535};
+    for (int index = 0; index < 10; ++index) {
+        require(numeric(api.value("input." + std::to_string(index))) == expected[index],
+            "Input registers did not honor per-mapping signed/unsigned interpretation");
+    }
+    struct CommandCase { double command; double signed_value; double unsigned_value; };
+    const CommandCase cases[] = {
+        {-10, -10, 0}, {-1, -1, 0}, {0, 0, 0}, {-32768, -32768, 0},
+        {32767, 32767, 32767}, {32768, 32767, 32768}, {65535, 32767, 65535},
+        {-40000, -32768, 0}, {70000, 32767, 65535}, {-10.5, -11, 0}, {10.5, 11, 11},
+        {std::numeric_limits<double>::quiet_NaN(), 0, 0},
+        {std::numeric_limits<double>::infinity(), 32767, 65535},
+        {-std::numeric_limits<double>::infinity(), -32768, 0}
+    };
+    for (const auto& sample : cases) {
+        api.upsertChannelField("command.signed", ChannelField::VALUE, sample.command, ChannelStorage::Fixed);
+        api.upsertChannelField("command.unsigned", ChannelField::VALUE, sample.command, ChannelStorage::Fixed);
+        write_type.on_task(write_type, write, 0.01);
+        read_type.on_task(read_type, read, 0.01);
+        require(numeric(api.value("command.signed_state")) == sample.signed_value &&
+            numeric(api.value("command.unsigned_state")) == sample.unsigned_value,
+            "Register write/readback did not honor signed ranges, rounding or unsigned compatibility");
+        require(numeric(api.value("raw.signed")) ==
+            (sample.signed_value < 0 ? sample.signed_value + 65536 : sample.signed_value),
+            "Signed command did not write the expected two's-complement bits");
+        require(numeric(api.value("signed.unsigned")) ==
+            (sample.unsigned_value >= 32768 ? sample.unsigned_value - 65536 : sample.unsigned_value),
+            "Holding-register reads did not honor signed interpretation");
+        require(numeric(api.value("format_write.modbus.stale")) == 0 &&
+            numeric(api.value("format_read.modbus.stale")) == 0,
+            "Register-format cycle failed its Modbus transactions");
+    }
+    for (const auto& bad : nlohmann::json::array({
+        {{"register_type", "input_register"}, {"data_type", "float32"}},
+        {{"register_type", "coil"}, {"data_type", "int16"}},
+        {{"register_type", "discrete_input"}, {"data_type", "int16"}},
+        {{"register_type", "input_register"}, {"data_type", 16}}
+    })) {
+        auto arguments = read.getArguments();
+        arguments["read_mappings"] = nlohmann::json::array({bad});
+        arguments["read_mappings"][0]["register"] = 0;
+        arguments["read_mappings"][0]["channel"] = "invalid";
+        MockRuntime invalid("format_read", "modbus_tcp_client.read", arguments);
+        bool rejected = false;
+        try { read_type.on_configure(read_type, invalid); }
+        catch (const std::exception&) { rejected = true; }
+        require(rejected, "Unsupported register format was accepted");
+    }
+    read_type.cleanup(read);
+    write_type.cleanup(write);
+    require(!simulator.failed(), "Register-format simulator failed");
+    std::cout << "Signed/unsigned register reads, wire writes, readbacks and limits passed.\n";
+}
+
 class ConnectionProbeSimulator {
 public:
     enum class Mode { Responsive, Silent, Exception };
@@ -624,6 +773,7 @@ int main(int argc, char** argv) {
         }
         testDiscoveryLifecycle();
         if (argc > 1 && std::string(argv[1]) == "--discovery-only") return 0;
+        testRegisterFormats();
         const int port = 15000 + static_cast<int>(
             std::chrono::steady_clock::now().time_since_epoch().count() % 1000);
         Simulator simulator(port);
