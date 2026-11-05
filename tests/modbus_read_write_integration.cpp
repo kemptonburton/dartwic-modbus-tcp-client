@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace {
 using namespace DARTWIC::API;
@@ -108,17 +109,21 @@ public:
         const auto found = values.find(channel);
         return found == values.end() ? (fallback ? numeric(*fallback) : 0.0) : numeric(found->second);
     }
-    void insertChannelField(const std::string& channel, ChannelField, ChannelValue value,
+    void insertChannelField(const std::string& channel, ChannelField field, ChannelValue value,
         ChannelStorage storage) override {
         std::scoped_lock lock(mutex_);
-        if (values.contains(channel)) throw std::runtime_error("duplicate insert");
-        values[channel] = std::move(value);
+        if (values.contains(channel)) return;
+        values[channel] = field == ChannelField::VALUE ? value : ChannelValue{0.0};
+        if (field == ChannelField::UNITS) units[channel] = std::get<std::string>(value);
         storages[channel] = storage;
     }
     void upsertChannelField(const std::string& channel, ChannelField field, ChannelValue value,
         ChannelStorage storage) override {
         std::scoped_lock lock(mutex_);
+        if (field == ChannelField::UNITS && owned_channels.contains(channel))
+            throw std::runtime_error("Channel requires control access to update units");
         if (field == ChannelField::VALUE) values[channel] = std::move(value);
+        if (field == ChannelField::UNITS) units[channel] = std::get<std::string>(value);
         storages[channel] = storage;
     }
     FixedChannelHandle createFixedChannel(const std::string& channel, double initial_value) override {
@@ -182,6 +187,7 @@ public:
         ++set_channel_count;
         observed_channels.push_back(channel);
         if (value) upsertChannelField(channel, ChannelField::VALUE, std::move(*value), ChannelStorage::Fixed);
+        owned_channels.insert(channel);
     }
     void freeChannel(const std::string&) override {}
     void applyAuthorityByName(uint32_t operation, const std::string& channel,
@@ -212,6 +218,8 @@ public:
     std::mutex mutex_;
     std::unordered_map<std::string, ChannelValue> values;
     std::unordered_map<std::string, ChannelStorage> storages;
+    std::unordered_map<std::string, std::string> units;
+    std::unordered_set<std::string> owned_channels;
     std::unordered_map<std::string, std::shared_ptr<DARTWIC::Modules::BaseModule>> modules;
     ModuleTypeDefinition module_type;
     std::unordered_map<std::string, TaskTypeDefinition> task_types;
@@ -538,6 +546,37 @@ void testRegisterFormats() {
     std::cout << "Signed/unsigned register reads, wire writes, readbacks and limits passed.\n";
 }
 
+void testConnectionSettings() {
+    MockApi api;
+    ModbusTCPClientPlugin plugin(nlohmann::json::object(), &api);
+    nlohmann::json parameters = {{"server_ip", "127.0.0.1"}, {"server_port", 502},
+        {"unit_id", 1}, {"tv_sec", 0}, {"tv_usec", 50000}, {"connection_monitor_enabled", false}};
+    const auto create = [&] {
+        return std::unique_ptr<DARTWIC::Modules::BaseModule>(plugin.createModule("tcp_client",
+            {{"name", "configured_device"}, {"parameters", parameters}}, &api));
+    };
+    auto initial = create();
+    const std::string channel = "configured_device.info.connected";
+    require(api.units.at(channel) == "bool", "New connection channel lacks Boolean units");
+    // Model the live connection monitor's existing sample and authority. The
+    // mock rejects metadata writes to this owned channel, just as RAPID does.
+    api.setChannel(channel, ChannelValue{1.0});
+    const auto channel_count = api.values.size();
+    const auto publication_count = api.set_channel_count;
+    for (const auto* setting : {"server_ip", "server_port", "unit_id", "tv_sec", "tv_usec"}) {
+        if (std::string(setting) == "server_ip") parameters[setting] = "127.0.0.2";
+        else parameters[setting] = std::string(setting) == "server_port" ? 1502 : 2;
+        auto replacement = create();
+        require(replacement->getParameter<nlohmann::json>(setting) == parameters[setting],
+            "Connection setting was not accepted by the replacement module");
+        require(numeric(api.value(channel)) == 1.0 && api.units.at(channel) == "bool" &&
+            api.values.size() == channel_count && api.set_channel_count == publication_count &&
+            api.owned_channels.contains(channel),
+            "Connection edits reset or renamed the existing monitor-owned status channel");
+    }
+    std::cout << "Connection settings reconfiguration preserves owned status channels.\n";
+}
+
 class ConnectionProbeSimulator {
 public:
     enum class Mode { Responsive, Silent, Exception };
@@ -767,12 +806,17 @@ void testDiscoveryLifecycle() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string(argv[1]) == "--configuration-only") {
+            testConnectionSettings();
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--connection-only") {
             testConnectionMonitor();
             return 0;
         }
         testDiscoveryLifecycle();
         if (argc > 1 && std::string(argv[1]) == "--discovery-only") return 0;
+        testConnectionSettings();
         testRegisterFormats();
         const int port = 15000 + static_cast<int>(
             std::chrono::steady_clock::now().time_since_epoch().count() % 1000);

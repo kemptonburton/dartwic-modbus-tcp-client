@@ -219,10 +219,13 @@ ModbusTCPClient::~ModbusTCPClient() {
 
 void ModbusTCPClient::configureConnectedChannel() {
     const std::string channel = instance_name_ + ".info.connected";
-    module_->dartwic->upsertChannelField(channel, DARTWIC::API::ChannelField::VALUE, 0.0,
+    // Seed metadata only when the channel is first created. A replacement
+    // module must not overwrite the live monitor's metadata or status sample.
+    module_->dartwic->insertChannelField(channel, DARTWIC::API::ChannelField::UNITS, std::string{"bool"},
         DARTWIC::API::ChannelStorage::Fixed);
-    module_->dartwic->upsertChannelField(channel, DARTWIC::API::ChannelField::UNITS, std::string{"bool"},
-        DARTWIC::API::ChannelStorage::Fixed);
+    // Rebinding a connection must preserve its existing status sample and owner.
+    // Only the monitor publishes the replacement client's connection health.
+    (void)module_->dartwic->createFixedChannel(channel, 0.0);
     module_->dartwic->upsertChannelField(channel, DARTWIC::API::ChannelField::STALE_TIMEOUT, 3.0,
         DARTWIC::API::ChannelStorage::Fixed);
     protocol_healthy_ = false;

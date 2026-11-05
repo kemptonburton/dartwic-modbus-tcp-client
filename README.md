@@ -115,6 +115,16 @@ does not replace the Modbus reconnect delay or the request timeout.
 
 ## Compatibility
 
+### Changing connection settings
+
+Open the module's **Module settings → Connection**, edit Address, Port, Unit ID
+or timeout, and apply. The Engine rebuilds the connection and rebinds linked
+tasks; I/O pauses during that work. The module and channel names remain unchanged.
+The connection-monitor loop remains the status channel's publisher, and
+the next tick publishes the new connection's health. Rebuilding the connection
+does not reset the previous status sample or rewrite its Boolean units. A full
+Engine restart is not required for these settings.
+
 ### Signed register values
 
 Each input- or holding-register mapping has a **Value format** setting. Choose

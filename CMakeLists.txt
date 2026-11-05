@@ -119,6 +119,7 @@ if(BUILD_TESTING)
     add_test(NAME modbus_read_write_integration COMMAND modbus_read_write_integration)
     add_test(NAME modbus_discovery_lifecycle COMMAND modbus_read_write_integration --discovery-only)
     add_test(NAME modbus_connection_monitor COMMAND modbus_read_write_integration --connection-only)
+    add_test(NAME modbus_connection_configuration COMMAND modbus_read_write_integration --configuration-only)
     set_tests_properties(modbus_connection_monitor PROPERTIES TIMEOUT 20)
 
     add_executable(modbus_live_probe tests/modbus_live_probe.cpp)
