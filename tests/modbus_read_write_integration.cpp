@@ -998,7 +998,7 @@ int main(int argc, char** argv) {
         api.modules["alternate"] = module;
         auto invalid_arguments = read_runtime.getArguments();
         invalid_arguments["module_instance_name"] = "alternate";
-        invalid_arguments["read_mappings"] = nlohmann::json::array();
+        invalid_arguments["read_mappings"][0]["register"] = -1;
         MockRuntime failed_reassignment("modbus_read", "modbus_tcp_client.read", invalid_arguments);
         bool reassignment_rejected = false;
         try { read_type.on_configure(read_type, failed_reassignment); }

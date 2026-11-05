@@ -190,11 +190,6 @@ void configureTask(const std::shared_ptr<ModbusTCPClientModule>& module, DARTWIC
     const auto writes = read_task
         ? std::vector<Mapping>{}
         : parseMappings(arguments, "write_mappings", RegisterType::Coil, true);
-    if (read_task ? reads.empty() : writes.empty()) {
-        throw std::runtime_error(read_task
-            ? "Configure at least one Modbus read mapping before starting this task."
-            : "Configure at least one Modbus write mapping before starting this task.");
-    }
     // Use the module-scoped API so RAPID records the producing module as well as
     // the plugin. The plugin-scoped API identifies `plugin:modbus_tcp_client`.
     for (const auto& mapping : reads) createFixedChannel(module_api, mapping.channel);
@@ -221,11 +216,6 @@ std::shared_ptr<RuntimeContext> createRuntime(const std::shared_ptr<ModbusTCPCli
     context->module = module;
     if (read_task) context->read_blocks = buildBlocks(parseMappings(arguments, "read_mappings", RegisterType::InputRegister));
     else context->write_blocks = buildBlocks(parseMappings(arguments, "write_mappings", RegisterType::Coil, true));
-    if (read_task ? context->read_blocks.empty() : context->write_blocks.empty()) {
-        throw std::runtime_error(read_task
-            ? "Configure at least one Modbus read mapping before starting this task."
-            : "Configure at least one Modbus write mapping before starting this task.");
-    }
     context->completed_blocks.resize(read_task ? context->read_blocks.size() : context->write_blocks.size());
     context->task_name = runtime.getTaskName();
     context->read_task = read_task;
@@ -247,6 +237,13 @@ std::shared_ptr<RuntimeContext> createRuntime(const std::shared_ptr<ModbusTCPCli
 }
 
 void claimTaskOutputs(const RuntimeContext& context) {
+    // The manual Create Task flow saves a stopped task before the operator
+    // adds mappings. Check readiness before claiming anything or starting I/O.
+    if (context.read_task ? context.read_blocks.empty() : context.write_blocks.empty()) {
+        throw std::runtime_error(context.read_task
+            ? "Configure at least one Modbus read mapping before starting this task."
+            : "Configure at least one Modbus write mapping before starting this task.");
+    }
     auto* api = context.module->dartwic;
     for (const auto& block : context.read_task ? context.read_blocks : context.write_blocks) {
         for (const auto& mapping : block.mappings) {

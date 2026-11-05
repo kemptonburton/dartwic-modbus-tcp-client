@@ -88,6 +88,13 @@ Build behavior:
 
 ### Periodic I/O and diagnostics
 
+To create a task without discovery, select **Modbus Read** or **Modbus Write**
+and its module in **Create task**. The task can be created with an empty mapping
+list. Open its configuration, add the register/channel mappings and apply them
+before starting. Start rejects empty mappings before taking channel authority
+or contacting the device. The same one-read/one-write limit per module applies
+to manual creation and discovery.
+
 Configuration groups adjacent registers, allocates reusable transaction buffers,
 declares the write task's fixed command inputs, and retains fixed RAPID handles
 for mapped channels and task diagnostics. Each write tick reads its command
