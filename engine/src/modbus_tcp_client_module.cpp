@@ -176,13 +176,19 @@ std::string diagnosticChannel(const std::string& task_name, const char* suffix) 
     return task_name + ".modbus." + suffix;
 }
 
-void createFixedChannel(DARTWIC::API::SDK_API* api, const std::string& channel, double initial_value = 0.0) {
-    (void)api->createFixedChannel(channel, initial_value);
-}
-
 void configureTask(const std::shared_ptr<ModbusTCPClientModule>& module, DARTWIC::API::TaskRuntime& runtime, bool read_task) {
     const auto& arguments = runtime.getArguments();
     auto* module_api = module->dartwic;
+    const bool auto_set_timeout = arguments.value("auto_set_stale_timeout", true);
+    const double stale_timeout = auto_set_timeout ? arguments.value("stale_timeout_seconds", 2.0) : 0.0;
+    if (auto_set_timeout && (!std::isfinite(stale_timeout) || stale_timeout <= 0.0)) {
+        throw std::runtime_error("Stale timeout must be a positive number of seconds.");
+    }
+    const auto configure_output = [&](const std::string& channel) {
+        (void)module_api->createFixedChannel(channel);
+        if (auto_set_timeout) module_api->upsertChannelField(channel, DARTWIC::API::ChannelField::STALE_TIMEOUT,
+            stale_timeout, DARTWIC::API::ChannelStorage::Fixed);
+    };
 
     const auto reads = read_task
         ? parseMappings(arguments, "read_mappings", RegisterType::InputRegister)
@@ -192,21 +198,19 @@ void configureTask(const std::shared_ptr<ModbusTCPClientModule>& module, DARTWIC
         : parseMappings(arguments, "write_mappings", RegisterType::Coil, true);
     // Use the module-scoped API so RAPID records the producing module as well as
     // the plugin. The plugin-scoped API identifies `plugin:modbus_tcp_client`.
-    for (const auto& mapping : reads) createFixedChannel(module_api, mapping.channel);
+    for (const auto& mapping : reads) configure_output(mapping.channel);
     for (const auto& mapping : writes) {
-        createFixedChannel(module_api, mapping.channel);
-        if (!mapping.readback_channel.empty()) createFixedChannel(module_api, mapping.readback_channel);
+        (void)module_api->createFixedChannel(mapping.channel);
+        if (!mapping.readback_channel.empty()) configure_output(mapping.readback_channel);
     }
     std::vector<std::string> fixed_inputs;
     fixed_inputs.reserve(writes.size());
     for (const auto& mapping : writes) fixed_inputs.push_back(mapping.channel);
     runtime.setFixedInputChannels(std::move(fixed_inputs));
-    createFixedChannel(module_api, diagnosticChannel(runtime.getTaskName(), "transaction_time_ms"));
-    createFixedChannel(module_api, diagnosticChannel(runtime.getTaskName(), "stale"), 1.0);
-    createFixedChannel(module_api, diagnosticChannel(runtime.getTaskName(), "failure_count"));
-    createFixedChannel(module_api, diagnosticChannel(runtime.getTaskName(), "reconnect_count"));
-
-
+    (void)module_api->createFixedChannel(diagnosticChannel(runtime.getTaskName(), "transaction_time_ms"));
+    (void)module_api->createFixedChannel(diagnosticChannel(runtime.getTaskName(), "stale"), 1.0);
+    (void)module_api->createFixedChannel(diagnosticChannel(runtime.getTaskName(), "failure_count"));
+    (void)module_api->createFixedChannel(diagnosticChannel(runtime.getTaskName(), "reconnect_count"));
 }
 
 std::shared_ptr<RuntimeContext> createRuntime(const std::shared_ptr<ModbusTCPClientModule>& module,
@@ -357,6 +361,7 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
     read_task.metadata.icon_url = "https://upload.wikimedia.org/wikipedia/commons/d/da/Logo_of_Modbus.svg";
     read_task.metadata.default_arguments = {
         {"module_instance_name", ""},
+        {"auto_set_stale_timeout", true}, {"stale_timeout_seconds", 2.0},
         {"read_mappings", nlohmann::json::array()},
     };
     task_bindings_.bind<ModbusTCPClientModule>(read_task, dartwic, "modbus_tcp_client", "tcp_client", 1,
@@ -404,6 +409,7 @@ void ModbusTCPClientPlugin::onPluginLoaded() {
     write_task.metadata.icon_url = "https://upload.wikimedia.org/wikipedia/commons/d/da/Logo_of_Modbus.svg";
     write_task.metadata.default_arguments = {
         {"module_instance_name", ""},
+        {"auto_set_stale_timeout", true}, {"stale_timeout_seconds", 2.0},
         {"write_mappings", nlohmann::json::array()}
     };
     task_bindings_.bind<ModbusTCPClientModule>(write_task, dartwic, "modbus_tcp_client", "tcp_client", 1,

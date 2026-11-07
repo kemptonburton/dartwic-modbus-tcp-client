@@ -51,11 +51,14 @@ export function taskMap(read: boolean) {
     groups: [{id: 'task', label: 'Task configuration', fields: [
       {path: 'arguments.module_instance_name', label: 'Module connection', type: 'module', required: true,
         pluginId: 'modbus_tcp_client', moduleTypeIds: ['tcp_client'], maxTasksPerModule: 1, description: 'One read and one write task per connection.'},
+      {path: 'arguments.auto_set_stale_timeout', label: 'Auto-set stale timeout', type: 'toggle', defaultValue: true,
+        description: 'Apply to mapped measurements or readbacks. Turn off to edit channel timeouts manually.'},
+      {path: 'arguments.stale_timeout_seconds', label: 'Stale timeout (seconds)', type: 'number', required: true, defaultValue: 2,
+        validate: value => value > 0 ? '' : 'Enter a positive stale timeout in seconds.'},
     ], tables: [mappings(read)]}],
     validate(value) {
       if (Array.isArray(value.arguments?.mappings)) return 'Legacy task arguments are unsupported; create a new read or write task.';
-      const rows = value.arguments?.[read ? 'read_mappings' : 'write_mappings'];
-      if (!rows?.length) return 'Configure at least one mapping.';
+      const rows = value.arguments?.[read ? 'read_mappings' : 'write_mappings'] || [];
       for (const row of rows) {
         if (row.data_type != null && !['uint16', 'int16'].includes(row.data_type))
           return 'Value format must be unsigned or signed 16-bit.';
